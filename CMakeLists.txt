@@ -20,8 +20,11 @@ add_executable(HostAgent
     HostAgent/main.cpp
     Shared/Protocol.h
     Core/Capture/ScreenCapturer.h
+    Core/Capture/ScreenCapturer.cpp
     Core/Input/InputInjector.h
+    Core/Input/InputInjector.cpp
     Core/Network/TcpNetwork.h
+    Core/Network/TcpNetwork.cpp
 )
 target_include_directories(HostAgent PRIVATE ${CORE_INCLUDES})
 target_link_libraries(HostAgent PRIVATE ${WINDOWS_LIBS})
@@ -32,6 +35,7 @@ add_executable(ClientViewer
     ClientViewer/main.cpp
     Shared/Protocol.h
     Core/Network/TcpNetwork.h
+    Core/Network/TcpNetwork.cpp
 )
 target_include_directories(ClientViewer PRIVATE ${CORE_INCLUDES})
 target_link_libraries(ClientViewer PRIVATE ${WINDOWS_LIBS})
