@@ -1,0 +1,13 @@
+{
+  "name": "gupt-signaling-server",
+  "version": "1.0.0",
+  "description": "WebSocket Signaling Server for Gupt Remote Desktop",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.13.0",
+    "uuid": "^9.0.0"
+  }
+}
