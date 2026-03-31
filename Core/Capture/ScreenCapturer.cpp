@@ -52,6 +52,13 @@ bool ScreenCapturer::CaptureNextFrame(std::vector<uint8_t>& outPixels, uint32_t&
         return false;
     }
 
+    // GDI GetDIBits sets the alpha byte (byte 3) to 0x00 for all pixels.
+    // The WIC JPEG encoder treats GUID_WICPixelFormat32bppBGRA as premultiplied:
+    // with alpha=0, all colours premultiply to 0 → black lines / RGB fringing.
+    // Fix: force alpha=0xFF (fully opaque) on every pixel before encoding.
+    for (size_t i = 3; i < outPixels.size(); i += 4)
+        outPixels[i] = 0xFF;
+
     DeleteObject(hBitmap);
     DeleteDC(hMemoryDC);
     ReleaseDC(NULL, hScreenDC);

@@ -34,6 +34,12 @@ RECT g_Card2Rect = { 0, 0, 0, 0 };
 RECT g_BackBtnRect = { 0, 0, 0, 0 };
 RECT g_CloseBtnRect = { 0, 0, 0, 0 };
 
+// Cached persistent back buffer (created once, reused every frame — avoids per-frame alloc)
+HDC    g_BackDC  = NULL;
+HBITMAP g_BackBmp = NULL;
+int    g_BackW   = 0;
+int    g_BackH   = 0;
+
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_TIMER:
@@ -41,10 +47,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 int targetX = g_SidebarOpen ? g_ScreenW - 260 : g_ScreenW;
                 if (g_SidebarX != targetX) {
                     if (g_SidebarX > targetX) {
-                        g_SidebarX -= 25;
+                        g_SidebarX -= 50;  // 50px/tick @ 10ms = 5000px/s — fast enough
                         if (g_SidebarX < targetX) g_SidebarX = targetX;
                     } else {
-                        g_SidebarX += 25;
+                        g_SidebarX += 50;
                         if (g_SidebarX > targetX) g_SidebarX = targetX;
                     }
                     InvalidateRect(hWnd, NULL, FALSE);
@@ -61,10 +67,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hWnd, &ps);
 
-            // === Double buffer: compose entire frame into one memory DC, blit once ===
-            HDC hdcBack = CreateCompatibleDC(hdc);
-            HBITMAP hbmBack = CreateCompatibleBitmap(hdc, g_ScreenW, g_ScreenH);
-            HBITMAP hbmBackOld = (HBITMAP)SelectObject(hdcBack, hbmBack);
+            // Reuse persistent back buffer — only (re)create when window size changes
+            if (!g_BackDC || g_BackW != g_ScreenW || g_BackH != g_ScreenH) {
+                if (g_BackDC) { SelectObject(g_BackDC, GetStockObject(BLACK_BRUSH)); DeleteObject(g_BackBmp); DeleteDC(g_BackDC); }
+                g_BackDC  = CreateCompatibleDC(hdc);
+                g_BackBmp = CreateCompatibleBitmap(hdc, g_ScreenW, g_ScreenH);
+                SelectObject(g_BackDC, g_BackBmp);
+                g_BackW = g_ScreenW; g_BackH = g_ScreenH;
+            }
+            HDC hdcBack = g_BackDC;
 
             // 1. Remote Frame (StretchDIBits into back buffer)
             {
@@ -97,8 +108,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     bmi.bmiHeader.biPlanes = 1;
                     bmi.bmiHeader.biBitCount = 32;
                     bmi.bmiHeader.biCompression = BI_RGB;
-                    SetStretchBltMode(hdcBack, HALFTONE);
-                    SetBrushOrgEx(hdcBack, 0, 0, NULL);
+                    // COLORONCOLOR is ~10x faster than HALFTONE; sufficient for remote desktop
+                    SetStretchBltMode(hdcBack, COLORONCOLOR);
 
                     StretchDIBits(hdcBack, g_DestX, g_DestY, g_DestW, g_DestH,
                                   0, 0, g_FrameWidth, g_FrameHeight,
@@ -207,7 +218,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
             // Final single blit to screen — eliminates all flickering
             BitBlt(hdc, 0, 0, g_ScreenW, g_ScreenH, hdcBack, 0, 0, SRCCOPY);
-            SelectObject(hdcBack, hbmBackOld); DeleteObject(hbmBack); DeleteDC(hdcBack);
+            // NOTE: hdcBack is persistent (g_BackDC) — do NOT delete it here
+
 
             EndPaint(hWnd, &ps);
             break;
