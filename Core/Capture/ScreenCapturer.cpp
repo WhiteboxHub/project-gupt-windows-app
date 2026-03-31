@@ -102,12 +102,23 @@ bool ScreenCapturer::CaptureNextFrameJpeg(std::vector<uint8_t>& outJpeg, uint32_
     if (FAILED(hr)) { pPropertybag->Release(); pFrame->Release(); pStream->Release(); pEncoder->Release(); pFactory->Release(); return false; }
 
     hr = pFrame->SetSize(outWidth, outHeight);
-    WICPixelFormatGUID formatGUID = GUID_WICPixelFormat32bppBGRA;
+
+    // JPEG does not support alpha. WIC silently changes GUID_WICPixelFormat32bppBGRA
+    // to 24bppBGR, but if we still pass stride=width*4, every row shifts by 1 byte
+    // causing diagonal colored lines. Fix: convert to 24bppBGR explicitly first.
+    std::vector<uint8_t> bgrPixels(outWidth * outHeight * 3);
+    for (uint32_t i = 0; i < outWidth * outHeight; ++i) {
+        bgrPixels[i * 3 + 0] = rawPixels[i * 4 + 0]; // B
+        bgrPixels[i * 3 + 1] = rawPixels[i * 4 + 1]; // G
+        bgrPixels[i * 3 + 2] = rawPixels[i * 4 + 2]; // R  (alpha discarded)
+    }
+
+    WICPixelFormatGUID formatGUID = GUID_WICPixelFormat24bppBGR;
     hr = pFrame->SetPixelFormat(&formatGUID);
 
-    UINT stride = outWidth * 4;
+    UINT stride = outWidth * 3;
     UINT cbBufferSize = stride * outHeight;
-    hr = pFrame->WritePixels(outHeight, stride, cbBufferSize, rawPixels.data());
+    hr = pFrame->WritePixels(outHeight, stride, cbBufferSize, bgrPixels.data());
 
     hr = pFrame->Commit();
     hr = pEncoder->Commit();

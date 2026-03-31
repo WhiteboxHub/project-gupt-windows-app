@@ -346,10 +346,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             break;
         }
         case WM_SIZE: {
-            g_ScreenW = LOWORD(lParam);
-            g_ScreenH = HIWORD(lParam);
+            int newW = LOWORD(lParam);
+            int newH = HIWORD(lParam);
+            if (newW < 1 || newH < 1) break; // ignore zero-size events
+            g_ScreenW = newW;
+            g_ScreenH = newH;
             if (!g_SidebarOpen) g_SidebarX = g_ScreenW;
             else g_SidebarX = g_ScreenW - 260;
+            // Force cached back buffer to be recreated at new size on next WM_PAINT
+            g_BackW = 0; g_BackH = 0;
+            InvalidateRect(hWnd, NULL, FALSE);
             break;
         }
         case WM_DESTROY: PostQuitMessage(0); break;
