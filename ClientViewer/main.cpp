@@ -9,75 +9,76 @@
 #include "../Shared/Protocol.h"
 #include "../Core/Network/TcpNetwork.h"
 
-// Globals
 using namespace gupt;
 
+// Core Globals
 bool g_IsConnected = false;
 gupt::core::network::TcpClient g_Client;
 std::mutex g_FrameMutex;
 std::vector<uint8_t> g_LatestFrame;
 uint32_t g_FrameWidth = 0;
 uint32_t g_FrameHeight = 0;
-
 int g_DestX = 0, g_DestY = 0, g_DestW = 800, g_DestH = 600;
 
+// Sidebar UI Globals
 bool g_SidebarOpen = false;
-int g_SidebarX = 0; // Updated in WinMain
+int g_ScreenW = 0;
+int g_ScreenH = 0;
+int g_SidebarX = 0;
 bool g_IsFullscreen = true;
-RECT g_WindowedRect = { 0, 0, 800, 600 };
-bool g_ScaleToFit = true;
-bool g_HighDPI = false;
-RECT g_TabRect = {0,0,0,0};
+RECT g_SavedRect = { 0, 0, 800, 600 };
+int g_HoveredCard = -1;
+RECT g_TabRect = { 0, 0, 0, 0 };
+RECT g_Card1Rect = { 0, 0, 0, 0 };
+RECT g_Card2Rect = { 0, 0, 0, 0 };
+RECT g_BackBtnRect = { 0, 0, 0, 0 };
+RECT g_CloseBtnRect = { 0, 0, 0, 0 };
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
-        case WM_CREATE:
-            SetTimer(hWnd, 1, 10, NULL);
-            break;
         case WM_TIMER:
             if (wParam == 1) {
-                RECT r; GetClientRect(hWnd, &r);
-                int w = r.right - r.left;
-                int targetX = g_SidebarOpen ? w - 300 : w;
+                int targetX = g_SidebarOpen ? g_ScreenW - 260 : g_ScreenW;
                 if (g_SidebarX != targetX) {
-                    if (g_SidebarX > targetX) g_SidebarX -= 30;
-                    if (g_SidebarX < targetX) g_SidebarX += 30;
-                    if (abs(g_SidebarX - targetX) < 30) g_SidebarX = targetX;
+                    if (g_SidebarX > targetX) {
+                        g_SidebarX -= 25;
+                        if (g_SidebarX < targetX) g_SidebarX = targetX;
+                    } else {
+                        g_SidebarX += 25;
+                        if (g_SidebarX > targetX) g_SidebarX = targetX;
+                    }
                     InvalidateRect(hWnd, NULL, FALSE);
+                }
+                if (g_SidebarX == targetX) {
+                    KillTimer(hWnd, 1);
                 }
             }
             break;
         case WM_PAINT: {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hWnd, &ps);
-            RECT rect; GetClientRect(hWnd, &rect);
-            int cw = rect.right - rect.left;
-            int ch = rect.bottom - rect.top;
 
             // 1. Remote Frame (StretchDIBits)
             {
                 std::lock_guard<std::mutex> lock(g_FrameMutex);
                 if (!g_LatestFrame.empty() && g_FrameWidth > 0 && g_FrameHeight > 0) {
                     float hostAspect = (float)g_FrameWidth / (float)g_FrameHeight;
-                    float clientAspect = (float)cw / (float)ch;
+                    float clientAspect = (float)g_ScreenW / (float)g_ScreenH;
 
-                    int destW, destH, destX, destY;
                     if (clientAspect > hostAspect) {
-                        destH = ch;
-                        destW = static_cast<int>(ch * hostAspect);
-                        destX = (cw - destW) / 2;
-                        destY = 0;
+                        g_DestH = g_ScreenH;
+                        g_DestW = static_cast<int>(g_ScreenH * hostAspect);
+                        g_DestX = (g_ScreenW - g_DestW) / 2;
+                        g_DestY = 0;
                     } else {
-                        destW = cw;
-                        destH = static_cast<int>(cw / hostAspect);
-                        destX = 0;
-                        destY = (ch - destH) / 2;
+                        g_DestW = g_ScreenW;
+                        g_DestH = static_cast<int>(g_ScreenW / hostAspect);
+                        g_DestX = 0;
+                        g_DestY = (g_ScreenH - g_DestH) / 2;
                     }
 
-                    g_DestX = destX; g_DestY = destY; g_DestW = destW; g_DestH = destH;
-
                     HBRUSH blackBrush = (HBRUSH)GetStockObject(BLACK_BRUSH);
-                    RECT fullRect = {0, 0, cw, ch};
+                    RECT fullRect = {0, 0, g_ScreenW, g_ScreenH};
                     FillRect(hdc, &fullRect, blackBrush);
 
                     BITMAPINFO bmi = {};
@@ -88,83 +89,114 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     bmi.bmiHeader.biBitCount = 32;
                     bmi.bmiHeader.biCompression = BI_RGB;
                     SetStretchBltMode(hdc, HALFTONE);
-                    
-                    StretchDIBits(hdc, destX, destY, destW, destH, 0, 0, g_FrameWidth, g_FrameHeight, g_LatestFrame.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
+
+                    StretchDIBits(hdc, g_DestX, g_DestY, g_DestW, g_DestH, 0, 0, g_FrameWidth, g_FrameHeight, g_LatestFrame.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
+                } else {
+                    HBRUSH blackBrush = (HBRUSH)GetStockObject(BLACK_BRUSH);
+                    RECT fullRect = {0, 0, g_ScreenW, g_ScreenH};
+                    FillRect(hdc, &fullRect, blackBrush);
                 }
             }
 
-            // 2. Sidebar Panel
-            if (g_SidebarX < cw) {
+            // 2. Sidebar Panel (when g_SidebarX < g_ScreenW)
+            if (g_SidebarX < g_ScreenW) {
                 HDC hdcMem = CreateCompatibleDC(hdc);
-                HBITMAP hbmMem = CreateCompatibleBitmap(hdc, 300, ch);
+                int sbw = g_ScreenW - g_SidebarX;
+                HBITMAP hbmMem = CreateCompatibleBitmap(hdc, sbw, g_ScreenH);
                 HBITMAP hbmOld = (HBITMAP)SelectObject(hdcMem, hbmMem);
 
-                RECT sbRect = { 0, 0, 300, ch };
+                RECT sbRect = { 0, 0, sbw, g_ScreenH };
                 HBRUSH wBrush = CreateSolidBrush(RGB(255, 255, 255));
                 FillRect(hdcMem, &sbRect, wBrush);
                 DeleteObject(wBrush);
 
-                HPEN borderPen = CreatePen(PS_SOLID, 1, RGB(200, 200, 200));
+                // Header Row (52px, RGB(247,247,247))
+                RECT headRect = { 0, 0, sbw, 52 };
+                HBRUSH thBrush = CreateSolidBrush(RGB(247, 247, 247));
+                FillRect(hdcMem, &headRect, thBrush);
+                DeleteObject(thBrush);
+                HPEN borderPen = CreatePen(PS_SOLID, 1, RGB(220, 220, 220));
                 HPEN oldPen = (HPEN)SelectObject(hdcMem, borderPen);
-                MoveToEx(hdcMem, 0, 0, NULL); LineTo(hdcMem, 0, ch);
+                MoveToEx(hdcMem, 0, 52, NULL); LineTo(hdcMem, sbw, 52);
                 SelectObject(hdcMem, oldPen); DeleteObject(borderPen);
 
-                // Toolbar
-                RECT tbRect = { 1, 0, 300, 48 };
-                HBRUSH tbBrush = CreateSolidBrush(RGB(245, 245, 245));
-                FillRect(hdcMem, &tbRect, tbBrush);
-                DeleteObject(tbBrush);
                 SetBkMode(hdcMem, TRANSPARENT);
-                SetTextColor(hdcMem, RGB(50, 50, 50));
-                HFONT font = CreateFontA(24, 0, 0, 0, FW_BOLD, 0, 0, 0, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Arial");
-                HFONT oldFont = (HFONT)SelectObject(hdcMem, font);
-                
-                RECT backRect = { 10, 8, 42, 40 }; DrawTextA(hdcMem, "<", -1, &backRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                RECT pinRect = { 134, 8, 166, 40 }; DrawTextA(hdcMem, "+", -1, &pinRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                RECT closeRect = { 258, 8, 290, 40 }; DrawTextA(hdcMem, "X", -1, &closeRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                SelectObject(hdcMem, oldFont); DeleteObject(font);
+                SetTextColor(hdcMem, RGB(40, 40, 40));
+                HFONT hFont = CreateFontA(20, 0, 0, 0, FW_BOLD, 0, 0, 0, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Arial");
+                HFONT oldFont = (HFONT)SelectObject(hdcMem, hFont);
 
-                // Action Buttons
-                font = CreateFontA(20, 0, 0, 0, FW_BOLD, 0, 0, 0, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Arial");
-                oldFont = (HFONT)SelectObject(hdcMem, font);
-                HPEN cardPen = CreatePen(PS_SOLID, 2, RGB(220, 220, 220));
-                oldPen = (HPEN)SelectObject(hdcMem, cardPen);
-                HBRUSH cBrush = CreateSolidBrush(RGB(250, 250, 250));
-                HBRUSH oldB = (HBRUSH)SelectObject(hdcMem, cBrush);
-                
-                RoundRect(hdcMem, 20, 100, 280, 200, 12, 12); // Full-screen
-                RoundRect(hdcMem, 20, 220, 280, 320, 12, 12); // Disconnect
-                SelectObject(hdcMem, oldB); DeleteObject(cBrush);
-                SelectObject(hdcMem, oldPen); DeleteObject(cardPen);
+                g_BackBtnRect = { g_SidebarX + 10, 8, g_SidebarX + 10 + 36, 44 };
+                g_CloseBtnRect = { g_ScreenW - 46, 8, g_ScreenW - 10, 44 };
 
-                const char* fsTxt = g_IsFullscreen ? "Exit Full-screen" : "Full-screen";
-                RECT fs1 = {20, 100, 280, 200}; DrawTextA(hdcMem, fsTxt, -1, &fs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                RECT dc1 = {20, 220, 280, 320}; DrawTextA(hdcMem, "Disconnect", -1, &dc1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                
-                SelectObject(hdcMem, oldFont); DeleteObject(font);
-                BitBlt(hdc, g_SidebarX, 0, 300, ch, hdcMem, 0, 0, SRCCOPY);
+                RECT brect = { 10, 8, 46, 44 };
+                DrawTextA(hdcMem, "<", -1, &brect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+                RECT crect = { sbw - 46, 8, sbw - 10, 44 };
+                DrawTextA(hdcMem, "X", -1, &crect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+                RECT trect = { 0, 0, sbw, 52 };
+                DrawTextA(hdcMem, "Gupt", -1, &trect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SelectObject(hdcMem, oldFont); DeleteObject(hFont);
+
+                // Action cards
+                int cW = (sbw - 42) / 2; // Each 109px wide given 14px padding all around
+                if (cW > 0) {
+                    g_Card1Rect = { g_SidebarX + 14, 66, g_SidebarX + 14 + cW, 66 + 88 };
+                    g_Card2Rect = { g_SidebarX + 14 + cW + 14, 66, g_SidebarX + 14 + cW + 14 + cW, 66 + 88 };
+
+                    HBRUSH normBrush = CreateSolidBrush(RGB(255, 255, 255));
+                    HBRUSH hovBrush = CreateSolidBrush(RGB(245, 245, 245));
+                    HPEN cPen = CreatePen(PS_SOLID, 1, RGB(220, 220, 220));
+                    oldPen = (HPEN)SelectObject(hdcMem, cPen);
+
+                    // Card 1
+                    SelectObject(hdcMem, g_HoveredCard == 1 ? hovBrush : normBrush);
+                    RoundRect(hdcMem, 14, 66, 14 + cW, 66 + 88, 8, 8);
+                    
+                    // Card 2
+                    SelectObject(hdcMem, g_HoveredCard == 2 ? hovBrush : normBrush);
+                    RoundRect(hdcMem, 14 + cW + 14, 66, 14 + cW + 14 + cW, 66 + 88, 8, 8);
+
+                    SelectObject(hdcMem, oldPen); DeleteObject(cPen);
+
+                    HFONT cFont = CreateFontA(14, 0, 0, 0, FW_BOLD, 0, 0, 0, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Arial");
+                    oldFont = (HFONT)SelectObject(hdcMem, cFont);
+
+                    SetTextColor(hdcMem, RGB(220, 50, 50));
+                    RECT cr1 = { 14, 66, 14 + cW, 66 + 88 };
+                    DrawTextA(hdcMem, "Disconnect", -1, &cr1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+                    SetTextColor(hdcMem, RGB(50, 100, 220));
+                    RECT cr2 = { 14 + cW + 14, 66, 14 + cW + 14 + cW, 66 + 88 };
+                    const char* fsTxt = g_IsFullscreen ? "Exit\nFull-screen" : "Full-screen";
+                    DrawTextA(hdcMem, fsTxt, -1, &cr2, DT_CENTER | DT_VCENTER);
+
+                    SelectObject(hdcMem, oldFont); DeleteObject(cFont);
+                    DeleteObject(normBrush); DeleteObject(hovBrush);
+                }
+
+                BitBlt(hdc, g_SidebarX, 0, sbw, g_ScreenH, hdcMem, 0, 0, SRCCOPY);
                 SelectObject(hdcMem, hbmOld); DeleteObject(hbmMem); DeleteDC(hdcMem);
             }
 
-            // 3. Tab Icon (Top of everything)
-            g_TabRect.left = g_SidebarX - 28;
-            g_TabRect.top = ch / 2 - 28;
+            // 3. Tab Button (Always draw last)
+            g_TabRect.left = g_SidebarX - 22;
             g_TabRect.right = g_SidebarX;
-            g_TabRect.bottom = ch / 2 + 28;
+            g_TabRect.top = g_ScreenH / 2 - 28;
+            g_TabRect.bottom = g_ScreenH / 2 + 28;
 
-            HBRUSH tabBrush = CreateSolidBrush(RGB(50, 50, 50));
+            HBRUSH tabBrush = CreateSolidBrush(RGB(45, 45, 45));
             HBRUSH oldTB = (HBRUSH)SelectObject(hdc, tabBrush);
-            HPEN transparentPen = CreatePen(PS_NULL, 0, 0);
-            HPEN oldTP = (HPEN)SelectObject(hdc, transparentPen);
-            RoundRect(hdc, g_TabRect.left, g_TabRect.top, g_TabRect.right + 10, g_TabRect.bottom, 10, 10);
-            SelectObject(hdc, oldTP); DeleteObject(transparentPen);
-            SelectObject(hdc, oldTB); DeleteObject(tabBrush);
+            HPEN tPen = CreatePen(PS_NULL, 0, 0);
+            HPEN oldTP = (HPEN)SelectObject(hdc, tPen);
+            RoundRect(hdc, g_TabRect.left, g_TabRect.top, g_TabRect.right + 10, g_TabRect.bottom, 12, 12);
+            SelectObject(hdc, oldTP); DeleteObject(tPen); SelectObject(hdc, oldTB); DeleteObject(tabBrush);
 
             SetBkMode(hdc, TRANSPARENT);
             SetTextColor(hdc, RGB(255, 255, 255));
-            HFONT tFont = CreateFontA(24, 0, 0, 0, FW_BOLD, 0, 0, 0, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Arial");
+            HFONT tFont = CreateFontA(16, 0, 0, 0, FW_BOLD, 0, 0, 0, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Arial");
             HFONT oldTFont = (HFONT)SelectObject(hdc, tFont);
-            RECT tr = { g_TabRect.left, g_TabRect.top, g_TabRect.left + 28, g_TabRect.bottom };
+            RECT tr = { g_TabRect.left, g_TabRect.top, g_TabRect.right, g_TabRect.bottom };
             const char* chev = g_SidebarOpen ? ">" : "<";
             DrawTextA(hdc, chev, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             SelectObject(hdc, oldTFont); DeleteObject(tFont);
@@ -172,67 +204,99 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             EndPaint(hWnd, &ps);
             break;
         }
-        case WM_MOUSEWHEEL:
-        case WM_MOUSEMOVE:
+        case WM_MOUSEMOVE: {
+            int x = (short)LOWORD(lParam); int y = (short)HIWORD(lParam);
+            if (g_SidebarOpen && x >= g_SidebarX) {
+                int hover = -1;
+                POINT pt = {x, y};
+                if (PtInRect(&g_Card1Rect, pt)) hover = 1;
+                else if (PtInRect(&g_Card2Rect, pt)) hover = 2;
+                if (hover != g_HoveredCard) {
+                    g_HoveredCard = hover;
+                    InvalidateRect(hWnd, NULL, FALSE);
+                }
+            }
+            if (g_SidebarOpen) return 0; // Gate forwarding
+            if (g_IsConnected) {
+                if (x >= g_DestX && x < g_DestX + g_DestW && y >= g_DestY && y < g_DestY + g_DestH) {
+                    shared::MouseEvent me = {};
+                    me.normalizedX = static_cast<float>(x - g_DestX) / g_DestW;
+                    me.normalizedY = static_cast<float>(y - g_DestY) / g_DestH;
+                    me.wheelDelta = 0; me.buttonId = 255; me.isDown = false;
+                    g_Client.SendRaw(shared::SerializeMessage(shared::MessageType::MouseEvent, me));
+                }
+            }
+            break;
+        }
+        case WM_MOUSEWHEEL: {
+            if (g_SidebarOpen) return 0;
+            if (g_IsConnected) {
+                int x = (short)LOWORD(lParam); int y = (short)HIWORD(lParam);
+                POINT pt = {x, y}; ScreenToClient(hWnd, &pt);
+                if (pt.x >= g_DestX && pt.x < g_DestX + g_DestW && pt.y >= g_DestY && pt.y < g_DestY + g_DestH) {
+                    shared::MouseEvent me = {};
+                    me.normalizedX = static_cast<float>(pt.x - g_DestX) / g_DestW;
+                    me.normalizedY = static_cast<float>(pt.y - g_DestY) / g_DestH;
+                    me.wheelDelta = (short)HIWORD(wParam);
+                    me.buttonId = 255; me.isDown = false;
+                    g_Client.SendRaw(shared::SerializeMessage(shared::MessageType::MouseEvent, me));
+                }
+            }
+            break;
+        }
         case WM_LBUTTONDOWN:
         case WM_LBUTTONUP:
         case WM_RBUTTONDOWN:
         case WM_RBUTTONUP: {
-            int x = (short)LOWORD(lParam); int y = (short)HIWORD(lParam);
-            RECT rect; GetClientRect(hWnd, &rect);
-            int cw = rect.right - rect.left; int ch = rect.bottom - rect.top;
-            if (cw == 0 || ch == 0) break;
-
+            int x = (short)LOWORD(lParam); int y = (short)HIWORD(lParam); POINT pt = {x, y};
             if (message == WM_LBUTTONDOWN) {
-                // Tab Priority 1
-                if (x >= g_TabRect.left && x <= g_TabRect.right && y >= g_TabRect.top && y <= g_TabRect.bottom) {
+                if (PtInRect(&g_TabRect, pt)) {
                     g_SidebarOpen = !g_SidebarOpen;
+                    SetTimer(hWnd, 1, 10, NULL);
                     return 0;
                 }
-
-                if (g_SidebarOpen && x >= g_SidebarX) { // Inside Sidebar Priority 2
-                    int lx = x - g_SidebarX;
-                    if (lx >= 250 && y <= 48) { g_SidebarOpen = false; return 0; } // close
-                    if (lx <= 50 && y <= 48) { g_SidebarOpen = false; return 0; } // back
-                    if (lx >= 20 && lx <= 280 && y >= 220 && y <= 320) { // Disconnect
+                if (g_SidebarOpen && x >= g_SidebarX) {
+                    if (PtInRect(&g_BackBtnRect, pt) || PtInRect(&g_CloseBtnRect, pt)) {
+                        g_SidebarOpen = false;
+                        SetTimer(hWnd, 1, 10, NULL);
+                        return 0;
+                    }
+                    if (PtInRect(&g_Card1Rect, pt)) {
                         g_Client.Disconnect(); PostQuitMessage(0); return 0;
                     }
-                    if (lx >= 20 && lx <= 280 && y >= 100 && y <= 200) { // Fullscreen
+                    if (PtInRect(&g_Card2Rect, pt)) {
                         g_IsFullscreen = !g_IsFullscreen;
                         if (g_IsFullscreen) {
-                            GetWindowRect(hWnd, &g_WindowedRect);
-                            SetWindowLongA(hWnd, GWL_STYLE, WS_POPUP | WS_VISIBLE | WS_EX_TOOLWINDOW); // Must force popup tool again! 
+                            GetWindowRect(hWnd, &g_SavedRect);
+                            SetWindowLongPtrA(hWnd, GWL_STYLE, WS_POPUP | WS_VISIBLE | WS_EX_TOOLWINDOW);
                             SetWindowPos(hWnd, HWND_TOP, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), SWP_SHOWWINDOW);
                         } else {
-                            SetWindowLongA(hWnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
-                            SetWindowPos(hWnd, HWND_TOP, g_WindowedRect.left, g_WindowedRect.top, g_WindowedRect.right - g_WindowedRect.left, g_WindowedRect.bottom - g_WindowedRect.top, SWP_SHOWWINDOW);
+                            SetWindowLongPtrA(hWnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+                            SetWindowPos(hWnd, HWND_TOP, g_SavedRect.left, g_SavedRect.top, g_SavedRect.right - g_SavedRect.left, g_SavedRect.bottom - g_SavedRect.top, SWP_SHOWWINDOW);
                         }
-                        g_SidebarOpen = false; return 0;
+                        g_SidebarOpen = false;
+                        SetTimer(hWnd, 1, 10, NULL);
+                        return 0;
                     }
-                    return 0;
-                } else if (g_SidebarOpen && x < g_SidebarX && !(x >= g_TabRect.left && x <= g_TabRect.right && y >= g_TabRect.top && y <= g_TabRect.bottom)) {
-                    // Click outside sidebar priority 3
+                    return 0; // Click inside sidebar nowhere meaningful
+                } else if (g_SidebarOpen && x < g_SidebarX) {
                     g_SidebarOpen = false;
+                    SetTimer(hWnd, 1, 10, NULL);
+                    // Fall through!
                 }
             }
 
-            if (g_SidebarOpen) return 0; // Input gating
+            if (g_SidebarOpen) return 0;
 
             if (g_IsConnected) {
                 if (x >= g_DestX && x < g_DestX + g_DestW && y >= g_DestY && y < g_DestY + g_DestH) {
                     shared::MouseEvent me = {};
                     me.normalizedX = static_cast<float>(x - g_DestX) / g_DestW;
                     me.normalizedY = static_cast<float>(y - g_DestY) / g_DestH;
-                    if (message == WM_MOUSEWHEEL) {
-                        POINT pt = {x, y}; ScreenToClient(hWnd, &pt);
-                        me.normalizedX = static_cast<float>(pt.x - g_DestX) / g_DestW; 
-                        me.normalizedY = static_cast<float>(pt.y - g_DestY) / g_DestH;
-                        me.wheelDelta = (short)HIWORD(wParam);
-                    } else me.wheelDelta = 0;
                     if (message == WM_LBUTTONDOWN || message == WM_LBUTTONUP) me.buttonId = 0;
-                    else if (message == WM_RBUTTONDOWN || message == WM_RBUTTONUP) me.buttonId = 1;
-                    else me.buttonId = 255;
+                    else me.buttonId = 1;
                     me.isDown = (message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN);
+                    me.wheelDelta = 0;
                     g_Client.SendRaw(shared::SerializeMessage(shared::MessageType::MouseEvent, me));
                 }
             }
@@ -243,21 +307,29 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             if (wParam == VK_F11 && message == WM_KEYDOWN) {
                 g_IsFullscreen = !g_IsFullscreen;
                 if (g_IsFullscreen) {
-                    GetWindowRect(hWnd, &g_WindowedRect);
-                    SetWindowLongA(hWnd, GWL_STYLE, WS_POPUP | WS_VISIBLE | WS_EX_TOOLWINDOW); 
+                    GetWindowRect(hWnd, &g_SavedRect);
+                    SetWindowLongPtrA(hWnd, GWL_STYLE, WS_POPUP | WS_VISIBLE | WS_EX_TOOLWINDOW);
                     SetWindowPos(hWnd, HWND_TOP, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), SWP_SHOWWINDOW);
                 } else {
-                    SetWindowLongA(hWnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
-                    SetWindowPos(hWnd, HWND_TOP, g_WindowedRect.left, g_WindowedRect.top, g_WindowedRect.right - g_WindowedRect.left, g_WindowedRect.bottom - g_WindowedRect.top, SWP_SHOWWINDOW);
+                    SetWindowLongPtrA(hWnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+                    SetWindowPos(hWnd, HWND_TOP, g_SavedRect.left, g_SavedRect.top, g_SavedRect.right - g_SavedRect.left, g_SavedRect.bottom - g_SavedRect.top, SWP_SHOWWINDOW);
                 }
                 g_SidebarOpen = false;
+                SetTimer(hWnd, 1, 10, NULL);
                 return 0;
             }
             if (g_SidebarOpen) return 0;
             if (g_IsConnected) {
-                shared::KeyboardEvent ke = {}; ke.virtualKey = wParam; ke.isDown = (message == WM_KEYDOWN);
+                shared::KeyboardEvent ke = {}; ke.virtualKey = (uint8_t)wParam; ke.isDown = (message == WM_KEYDOWN);
                 g_Client.SendRaw(shared::SerializeMessage(shared::MessageType::KeyboardEvent, ke));
             }
+            break;
+        }
+        case WM_SIZE: {
+            g_ScreenW = LOWORD(lParam);
+            g_ScreenH = HIWORD(lParam);
+            if (!g_SidebarOpen) g_SidebarX = g_ScreenW;
+            else g_SidebarX = g_ScreenW - 260;
             break;
         }
         case WM_DESTROY: PostQuitMessage(0); break;
@@ -268,15 +340,24 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-    WNDCLASSA wc = {}; wc.lpfnWndProc = WndProc; wc.hInstance = hInstance; wc.lpszClassName = "GuptClientClass"; wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+
+    WNDCLASSA wc = {}; 
+    wc.lpfnWndProc = WndProc; 
+    wc.hInstance = hInstance; 
+    wc.lpszClassName = "GuptClientClass"; 
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClassA(&wc);
-    int sw = GetSystemMetrics(SM_CXSCREEN); int sh = GetSystemMetrics(SM_CYSCREEN);
-    g_WindowedRect = { (sw - 800) / 2, (sh - 600) / 2, (sw + 800) / 2, (sh + 600) / 2 };
-    g_SidebarX = sw; // Start closed
-    HWND hWnd = CreateWindowExA(WS_EX_TOOLWINDOW, "GuptClientClass", "", WS_POPUP, 0, 0, sw, sh, NULL, NULL, hInstance, NULL);
-    ShowWindow(hWnd, nCmdShow); UpdateWindow(hWnd);
+
+    g_ScreenW = GetSystemMetrics(SM_CXSCREEN); 
+    g_ScreenH = GetSystemMetrics(SM_CYSCREEN);
+    g_SidebarX = g_ScreenW; 
+    
+    HWND hWnd = CreateWindowExA(WS_EX_TOOLWINDOW, "GuptClientClass", "", WS_POPUP | WS_VISIBLE, 0, 0, g_ScreenW, g_ScreenH, NULL, NULL, hInstance, NULL);
+    SetWindowPos(hWnd, HWND_TOP, 0, 0, g_ScreenW, g_ScreenH, SWP_SHOWWINDOW);
+    UpdateWindow(hWnd);
 
     g_Client.SetMessageCallback([hWnd](shared::MessageType type, const std::vector<uint8_t>& payload) {
+        thread_local bool t_comInit = (CoInitializeEx(NULL, COINIT_APARTMENTTHREADED) == S_OK || true);
         if (type == shared::MessageType::ConnectResponse) {
             auto res = reinterpret_cast<const shared::ConnectResponse*>(payload.data());
             if (res->accepted) g_IsConnected = true;
@@ -321,10 +402,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     });
 
     if (g_Client.Connect("127.0.0.1", 8080)) {
-        shared::ConnectRequest req = {}; std::strncpy(req.sessionId, "DEMO_SESSION_123", sizeof(req.sessionId)); std::strncpy(req.authenticationToken, "SECURE_TOKEN", sizeof(req.authenticationToken));
+        shared::ConnectRequest req = {}; 
+        std::strncpy(req.sessionId, "DEMO_SESSION_123", sizeof(req.sessionId)); 
+        std::strncpy(req.authenticationToken, "SECURE_TOKEN", sizeof(req.authenticationToken));
         g_Client.SendRaw(shared::SerializeMessage(shared::MessageType::ConnectRequest, req));
     }
 
-    MSG msg; while (GetMessage(&msg, NULL, 0, 0)) { TranslateMessage(&msg); DispatchMessage(&msg); }
-    g_Client.Disconnect(); return static_cast<int>(msg.wParam);
+    MSG msg; 
+    while (GetMessage(&msg, NULL, 0, 0)) { 
+        TranslateMessage(&msg); 
+        DispatchMessage(&msg); 
+    }
+    g_Client.Disconnect(); 
+    return static_cast<int>(msg.wParam);
 }

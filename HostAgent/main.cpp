@@ -83,22 +83,22 @@ int main() {
         ULONGLONG lastSendDuration = 0;
         while (true) {
             if (g_SessionActive) {
+                if (lastSendDuration > 66) {
+                    Sleep(33);
+                    lastSendDuration = 0;
+                    continue;
+                }
+
                 ULONGLONG startTime = GetTickCount64();
                 
                 std::vector<uint8_t> pixels;
                 uint32_t w, h;
                 
-                if (capturer.CaptureNextFrameJpeg(pixels, w, h, 40)) {
-                    if (lastSendDuration > 66) {
-                        // Skip this frame to prevent queue buildup
-                        lastSendDuration = 0; 
-                    } else {
-                        // delta encoding is a future improvement
-                        shared::FrameDataHeader header{0, w, h, 32, false, GetTickCount64()};
-                        ULONGLONG startSend = GetTickCount64();
-                        server.SendRaw(shared::SerializeFrame(header, pixels));
-                        lastSendDuration = GetTickCount64() - startSend;
-                    }
+                if (capturer.CaptureNextFrame(pixels, w, h)) {
+                    shared::FrameDataHeader header{0, w, h, 32, false, GetTickCount64()};
+                    ULONGLONG startSend = GetTickCount64();
+                    server.SendRaw(shared::SerializeFrame(header, pixels));
+                    lastSendDuration = GetTickCount64() - startSend;
                 }
                 
                 ULONGLONG elapsed = GetTickCount64() - startTime;

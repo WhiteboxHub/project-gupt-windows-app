@@ -80,7 +80,7 @@ void TcpServer::AcceptThread() {
         
         if (clientSocket != INVALID_SOCKET) {
             int flag = 1;
-            setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(int));
+            setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
             
             if (m_ClientSocket != INVALID_SOCKET) {
                 closesocket(m_ClientSocket);
@@ -171,7 +171,7 @@ bool TcpClient::Connect(const std::string& host, uint16_t port) {
     }
 
     int flag = 1;
-    setsockopt(m_Socket, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(int));
+    setsockopt(m_Socket, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
 
     m_IsConnected = true;
     std::thread(&TcpClient::ReceiveThread, this).detach();
