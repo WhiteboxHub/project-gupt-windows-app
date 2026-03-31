@@ -34,14 +34,16 @@ void InputInjector::IngestMouseEvent(const gupt::shared::MouseEvent& ev) {
         input.mi.mouseData = ev.wheelDelta;
     }
 
-    if (ev.isDown) {
-        if (ev.buttonId == 0) input.mi.dwFlags |= MOUSEEVENTF_LEFTDOWN;
-        else if (ev.buttonId == 1) input.mi.dwFlags |= MOUSEEVENTF_RIGHTDOWN;
-        else if (ev.buttonId == 2) input.mi.dwFlags |= MOUSEEVENTF_MIDDLEDOWN;
-    } else {
-        if (ev.buttonId == 0) input.mi.dwFlags |= MOUSEEVENTF_LEFTUP;
-        else if (ev.buttonId == 1) input.mi.dwFlags |= MOUSEEVENTF_RIGHTUP;
-        else if (ev.buttonId == 2) input.mi.dwFlags |= MOUSEEVENTF_MIDDLEUP;
+    if (ev.buttonId != 255) {
+        if (ev.isDown) {
+            if (ev.buttonId == 0) input.mi.dwFlags |= MOUSEEVENTF_LEFTDOWN;
+            else if (ev.buttonId == 1) input.mi.dwFlags |= MOUSEEVENTF_RIGHTDOWN;
+            else if (ev.buttonId == 2) input.mi.dwFlags |= MOUSEEVENTF_MIDDLEDOWN;
+        } else {
+            if (ev.buttonId == 0) input.mi.dwFlags |= MOUSEEVENTF_LEFTUP;
+            else if (ev.buttonId == 1) input.mi.dwFlags |= MOUSEEVENTF_RIGHTUP;
+            else if (ev.buttonId == 2) input.mi.dwFlags |= MOUSEEVENTF_MIDDLEUP;
+        }
     }
 
     SendInput(1, &input, sizeof(INPUT));

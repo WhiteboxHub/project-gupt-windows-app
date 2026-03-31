@@ -46,6 +46,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             EndPaint(hWnd, &ps);
             break;
         }
+        case WM_MOUSEWHEEL:
         case WM_MOUSEMOVE:
         case WM_LBUTTONDOWN:
         case WM_LBUTTONUP:
@@ -60,15 +61,27 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 int clientH = rect.bottom - rect.top;
                 if (clientW == 0 || clientH == 0) break;
 
-                int x = LOWORD(lParam);
-                int y = HIWORD(lParam);
+                int x, y;
+                if (message == WM_MOUSEWHEEL) {
+                    POINT pt;
+                    pt.x = (short)LOWORD(lParam);
+                    pt.y = (short)HIWORD(lParam);
+                    ScreenToClient(hWnd, &pt);
+                    x = pt.x;
+                    y = pt.y;
+                    me.wheelDelta = (short)HIWORD(wParam);
+                } else {
+                    x = (short)LOWORD(lParam);
+                    y = (short)HIWORD(lParam);
+                    me.wheelDelta = 0;
+                }
 
                 me.normalizedX = static_cast<float>(x) / clientW;
                 me.normalizedY = static_cast<float>(y) / clientH;
-                me.wheelDelta = 0;
                 
                 if (message == WM_LBUTTONDOWN || message == WM_LBUTTONUP) me.buttonId = 0;
                 else if (message == WM_RBUTTONDOWN || message == WM_RBUTTONUP) me.buttonId = 1;
+                else me.buttonId = 255; // 255 stands for 'move or scroll only'
 
                 me.isDown = (message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN);
                 
