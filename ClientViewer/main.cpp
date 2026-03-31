@@ -104,38 +104,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 RECT closeRect = { 258, 8, 290, 40 }; DrawTextA(hdcMem, "X", -1, &closeRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 SelectObject(hdcMem, oldFont); DeleteObject(font);
 
-                // Cards
-                font = CreateFontA(14, 0, 0, 0, FW_NORMAL, 0, 0, 0, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Arial");
+                // Action Buttons
+                font = CreateFontA(20, 0, 0, 0, FW_BOLD, 0, 0, 0, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Arial");
                 oldFont = (HFONT)SelectObject(hdcMem, font);
-                HPEN cardPen = CreatePen(PS_SOLID, 1, RGB(230,230,230));
+                HPEN cardPen = CreatePen(PS_SOLID, 2, RGB(220, 220, 220));
                 oldPen = (HPEN)SelectObject(hdcMem, cardPen);
-                HBRUSH cBrush = CreateSolidBrush(RGB(255,255,255));
+                HBRUSH cBrush = CreateSolidBrush(RGB(250, 250, 250));
                 HBRUSH oldB = (HBRUSH)SelectObject(hdcMem, cBrush);
                 
-                RoundRect(hdcMem, 10, 60, 140, 140, 8, 8); // Left
-                RoundRect(hdcMem, 150, 60, 280, 140, 8, 8); // Right
+                RoundRect(hdcMem, 20, 100, 280, 200, 12, 12); // Full-screen
+                RoundRect(hdcMem, 20, 220, 280, 320, 12, 12); // Disconnect
                 SelectObject(hdcMem, oldB); DeleteObject(cBrush);
                 SelectObject(hdcMem, oldPen); DeleteObject(cardPen);
 
-                RECT dc1 = {10, 110, 140, 140}; DrawTextA(hdcMem, "Disconnect", -1, &dc1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                const char* fsTxt = g_IsFullscreen ? "Exit full-screen" : "Full-screen";
-                RECT fs1 = {150, 110, 280, 140}; DrawTextA(hdcMem, fsTxt, -1, &fs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-                // Section header
-                HFONT fontB = CreateFontA(14, 0, 0, 0, FW_BOLD, 0, 0, 0, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Arial");
-                SelectObject(hdcMem, fontB);
-                RECT shRect = { 10, 160, 140, 190 }; DrawTextA(hdcMem, "Session options", -1, &shRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-                RECT sh2Rect = { 260, 160, 290, 190 }; DrawTextA(hdcMem, "^", -1, &sh2Rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                SelectObject(hdcMem, font); DeleteObject(fontB);
-
-                // Checkboxes
-                RECT chk1 = { 10, 190, 280, 246 }; 
-                const char* sftxt = g_ScaleToFit ? "[x] Scale to fit" : "[ ] Scale to fit";
-                DrawTextA(hdcMem, sftxt, -1, &chk1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-                
-                RECT chk2 = { 10, 246, 280, 302 }; 
-                const char* hdtxt = g_HighDPI ? "[x] High-DPI mode" : "[ ] High-DPI mode";
-                DrawTextA(hdcMem, hdtxt, -1, &chk2, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                const char* fsTxt = g_IsFullscreen ? "Exit Full-screen" : "Full-screen";
+                RECT fs1 = {20, 100, 280, 200}; DrawTextA(hdcMem, fsTxt, -1, &fs1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                RECT dc1 = {20, 220, 280, 320}; DrawTextA(hdcMem, "Disconnect", -1, &dc1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 
                 SelectObject(hdcMem, oldFont); DeleteObject(font);
                 BitBlt(hdc, g_SidebarX, 0, 300, ch, hdcMem, 0, 0, SRCCOPY);
@@ -190,10 +174,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     int lx = x - g_SidebarX;
                     if (lx >= 250 && y <= 48) { g_SidebarOpen = false; return 0; } // close
                     if (lx <= 50 && y <= 48) { g_SidebarOpen = false; return 0; } // back
-                    if (lx >= 10 && lx <= 140 && y >= 60 && y <= 140) { // Disconnect
+                    if (lx >= 20 && lx <= 280 && y >= 220 && y <= 320) { // Disconnect
                         g_Client.Disconnect(); PostQuitMessage(0); return 0;
                     }
-                    if (lx >= 150 && lx <= 280 && y >= 60 && y <= 140) { // Fullscreen
+                    if (lx >= 20 && lx <= 280 && y >= 100 && y <= 200) { // Fullscreen
                         g_IsFullscreen = !g_IsFullscreen;
                         if (g_IsFullscreen) {
                             GetWindowRect(hWnd, &g_WindowedRect);
@@ -205,8 +189,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         }
                         g_SidebarOpen = false; return 0;
                     }
-                    if (y >= 190 && y <= 246) { g_ScaleToFit = !g_ScaleToFit; InvalidateRect(hWnd, NULL, FALSE); return 0; }
-                    if (y >= 246 && y <= 302) { g_HighDPI = !g_HighDPI; InvalidateRect(hWnd, NULL, FALSE); return 0; }
                     return 0;
                 } else if (g_SidebarOpen && x < g_SidebarX && !(x >= g_TabRect.left && x <= g_TabRect.right && y >= g_TabRect.top && y <= g_TabRect.bottom)) {
                     // Click outside sidebar priority 3
