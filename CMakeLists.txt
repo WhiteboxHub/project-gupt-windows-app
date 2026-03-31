@@ -10,7 +10,7 @@ if(NOT WIN32)
 endif()
 
 # Group core dependencies
-set(WINDOWS_LIBS d3d11 dxgi ws2_32 user32 gdi32 msimg32)
+set(WINDOWS_LIBS d3d11 dxgi ws2_32 user32 gdi32 msimg32 windowscodecs shlwapi)
 
 # Include directories
 set(CORE_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR})

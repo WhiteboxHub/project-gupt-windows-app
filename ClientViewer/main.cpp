@@ -4,6 +4,8 @@
 #include <thread>
 #include <vector>
 #include <mutex>
+#include <wincodec.h>
+#include <shlwapi.h>
 #include "../Shared/Protocol.h"
 #include "../Core/Network/TcpNetwork.h"
 
@@ -16,6 +18,8 @@ std::mutex g_FrameMutex;
 std::vector<uint8_t> g_LatestFrame;
 uint32_t g_FrameWidth = 0;
 uint32_t g_FrameHeight = 0;
+
+int g_DestX = 0, g_DestY = 0, g_DestW = 800, g_DestH = 600;
 
 bool g_SidebarOpen = false;
 int g_SidebarX = 0; // Updated in WinMain
@@ -54,6 +58,28 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             {
                 std::lock_guard<std::mutex> lock(g_FrameMutex);
                 if (!g_LatestFrame.empty() && g_FrameWidth > 0 && g_FrameHeight > 0) {
+                    float hostAspect = (float)g_FrameWidth / (float)g_FrameHeight;
+                    float clientAspect = (float)cw / (float)ch;
+
+                    int destW, destH, destX, destY;
+                    if (clientAspect > hostAspect) {
+                        destH = ch;
+                        destW = static_cast<int>(ch * hostAspect);
+                        destX = (cw - destW) / 2;
+                        destY = 0;
+                    } else {
+                        destW = cw;
+                        destH = static_cast<int>(cw / hostAspect);
+                        destX = 0;
+                        destY = (ch - destH) / 2;
+                    }
+
+                    g_DestX = destX; g_DestY = destY; g_DestW = destW; g_DestH = destH;
+
+                    HBRUSH blackBrush = (HBRUSH)GetStockObject(BLACK_BRUSH);
+                    RECT fullRect = {0, 0, cw, ch};
+                    FillRect(hdc, &fullRect, blackBrush);
+
                     BITMAPINFO bmi = {};
                     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
                     bmi.bmiHeader.biWidth = g_FrameWidth;
@@ -63,13 +89,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     bmi.bmiHeader.biCompression = BI_RGB;
                     SetStretchBltMode(hdc, HALFTONE);
                     
-                    if (g_ScaleToFit) {
-                        StretchDIBits(hdc, 0, 0, cw, ch, 0, 0, g_FrameWidth, g_FrameHeight, g_LatestFrame.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
-                    } else {
-                        int dx = (cw - g_FrameWidth) / 2;
-                        int dy = (ch - g_FrameHeight) / 2;
-                        StretchDIBits(hdc, dx, dy, g_FrameWidth, g_FrameHeight, 0, 0, g_FrameWidth, g_FrameHeight, g_LatestFrame.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
-                    }
+                    StretchDIBits(hdc, destX, destY, destW, destH, 0, 0, g_FrameWidth, g_FrameHeight, g_LatestFrame.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
                 }
             }
 
@@ -199,19 +219,22 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             if (g_SidebarOpen) return 0; // Input gating
 
             if (g_IsConnected) {
-                shared::MouseEvent me = {};
-                me.normalizedX = static_cast<float>(x) / cw;
-                me.normalizedY = static_cast<float>(y) / ch;
-                if (message == WM_MOUSEWHEEL) {
-                    POINT pt = {x, y}; ScreenToClient(hWnd, &pt);
-                    me.normalizedX = static_cast<float>(pt.x) / cw; me.normalizedY = static_cast<float>(pt.y) / ch;
-                    me.wheelDelta = (short)HIWORD(wParam);
-                } else me.wheelDelta = 0;
-                if (message == WM_LBUTTONDOWN || message == WM_LBUTTONUP) me.buttonId = 0;
-                else if (message == WM_RBUTTONDOWN || message == WM_RBUTTONUP) me.buttonId = 1;
-                else me.buttonId = 255;
-                me.isDown = (message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN);
-                g_Client.SendRaw(shared::SerializeMessage(shared::MessageType::MouseEvent, me));
+                if (x >= g_DestX && x < g_DestX + g_DestW && y >= g_DestY && y < g_DestY + g_DestH) {
+                    shared::MouseEvent me = {};
+                    me.normalizedX = static_cast<float>(x - g_DestX) / g_DestW;
+                    me.normalizedY = static_cast<float>(y - g_DestY) / g_DestH;
+                    if (message == WM_MOUSEWHEEL) {
+                        POINT pt = {x, y}; ScreenToClient(hWnd, &pt);
+                        me.normalizedX = static_cast<float>(pt.x - g_DestX) / g_DestW; 
+                        me.normalizedY = static_cast<float>(pt.y - g_DestY) / g_DestH;
+                        me.wheelDelta = (short)HIWORD(wParam);
+                    } else me.wheelDelta = 0;
+                    if (message == WM_LBUTTONDOWN || message == WM_LBUTTONUP) me.buttonId = 0;
+                    else if (message == WM_RBUTTONDOWN || message == WM_RBUTTONUP) me.buttonId = 1;
+                    else me.buttonId = 255;
+                    me.isDown = (message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN);
+                    g_Client.SendRaw(shared::SerializeMessage(shared::MessageType::MouseEvent, me));
+                }
             }
             break;
         }
@@ -244,6 +267,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     WNDCLASSA wc = {}; wc.lpfnWndProc = WndProc; wc.hInstance = hInstance; wc.lpszClassName = "GuptClientClass"; wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     RegisterClassA(&wc);
     int sw = GetSystemMetrics(SM_CXSCREEN); int sh = GetSystemMetrics(SM_CYSCREEN);
@@ -259,10 +283,39 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         } else if (type == shared::MessageType::FrameData) {
             auto hd = reinterpret_cast<const shared::FrameDataHeader*>(payload.data());
             size_t off = sizeof(shared::FrameDataHeader);
-            if (payload.size() >= off + (hd->width * hd->height * 4)) {
-                std::lock_guard<std::mutex> lock(g_FrameMutex); g_FrameWidth = hd->width; g_FrameHeight = hd->height;
-                g_LatestFrame.assign(payload.begin() + off, payload.end());
-                InvalidateRect(hWnd, NULL, FALSE);
+            if (payload.size() > off) {
+                IStream* pStream = SHCreateMemStream(payload.data() + off, static_cast<UINT>(payload.size() - off));
+                if (pStream) {
+                    IWICImagingFactory* pFactory = NULL;
+                    if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pFactory)))) {
+                        IWICBitmapDecoder* pDecoder = NULL;
+                        if (SUCCEEDED(pFactory->CreateDecoderFromStream(pStream, NULL, WICDecodeMetadataCacheOnDemand, &pDecoder))) {
+                            IWICBitmapFrameDecode* pFrame = NULL;
+                            if (SUCCEEDED(pDecoder->GetFrame(0, &pFrame))) {
+                                IWICFormatConverter* pConverter = NULL;
+                                if (SUCCEEDED(pFactory->CreateFormatConverter(&pConverter))) {
+                                    if (SUCCEEDED(pConverter->Initialize(pFrame, GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, NULL, 0.f, WICBitmapPaletteTypeCustom))) {
+                                        UINT w, h;
+                                        pConverter->GetSize(&w, &h);
+                                        std::vector<uint8_t> decoded(w * h * 4);
+                                        if (SUCCEEDED(pConverter->CopyPixels(NULL, w * 4, static_cast<UINT>(decoded.size()), decoded.data()))) {
+                                            std::lock_guard<std::mutex> lock(g_FrameMutex);
+                                            g_FrameWidth = w;
+                                            g_FrameHeight = h;
+                                            g_LatestFrame = std::move(decoded);
+                                            InvalidateRect(hWnd, NULL, FALSE);
+                                        }
+                                    }
+                                    pConverter->Release();
+                                }
+                                pFrame->Release();
+                            }
+                            pDecoder->Release();
+                        }
+                        pFactory->Release();
+                    }
+                    pStream->Release();
+                }
             }
         }
     });
