@@ -54,16 +54,24 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 }
             }
             break;
+        case WM_ERASEBKGND:
+            return 1; // Suppress background erase to prevent white-flash flicker
+
         case WM_PAINT: {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hWnd, &ps);
 
-            // 1. Remote Frame (StretchDIBits)
+            // === Double buffer: compose entire frame into one memory DC, blit once ===
+            HDC hdcBack = CreateCompatibleDC(hdc);
+            HBITMAP hbmBack = CreateCompatibleBitmap(hdc, g_ScreenW, g_ScreenH);
+            HBITMAP hbmBackOld = (HBITMAP)SelectObject(hdcBack, hbmBack);
+
+            // 1. Remote Frame (StretchDIBits into back buffer)
             {
                 std::lock_guard<std::mutex> lock(g_FrameMutex);
                 if (!g_LatestFrame.empty() && g_FrameWidth > 0 && g_FrameHeight > 0) {
                     float hostAspect = (float)g_FrameWidth / (float)g_FrameHeight;
-                    float clientAspect = (float)g_ScreenW / (float)g_ScreenH;
+                    float clientAspect = (g_ScreenH > 0) ? (float)g_ScreenW / (float)g_ScreenH : 1.f;
 
                     if (clientAspect > hostAspect) {
                         g_DestH = g_ScreenH;
@@ -77,9 +85,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         g_DestY = (g_ScreenH - g_DestH) / 2;
                     }
 
+                    // Fill black letterbox bars
                     HBRUSH blackBrush = (HBRUSH)GetStockObject(BLACK_BRUSH);
                     RECT fullRect = {0, 0, g_ScreenW, g_ScreenH};
-                    FillRect(hdc, &fullRect, blackBrush);
+                    FillRect(hdcBack, &fullRect, blackBrush);
 
                     BITMAPINFO bmi = {};
                     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -88,118 +97,117 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     bmi.bmiHeader.biPlanes = 1;
                     bmi.bmiHeader.biBitCount = 32;
                     bmi.bmiHeader.biCompression = BI_RGB;
-                    SetStretchBltMode(hdc, HALFTONE);
+                    SetStretchBltMode(hdcBack, HALFTONE);
+                    SetBrushOrgEx(hdcBack, 0, 0, NULL);
 
-                    StretchDIBits(hdc, g_DestX, g_DestY, g_DestW, g_DestH, 0, 0, g_FrameWidth, g_FrameHeight, g_LatestFrame.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
+                    StretchDIBits(hdcBack, g_DestX, g_DestY, g_DestW, g_DestH,
+                                  0, 0, g_FrameWidth, g_FrameHeight,
+                                  g_LatestFrame.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
                 } else {
                     HBRUSH blackBrush = (HBRUSH)GetStockObject(BLACK_BRUSH);
                     RECT fullRect = {0, 0, g_ScreenW, g_ScreenH};
-                    FillRect(hdc, &fullRect, blackBrush);
+                    FillRect(hdcBack, &fullRect, blackBrush);
                 }
             }
 
-            // 2. Sidebar Panel (when g_SidebarX < g_ScreenW)
+            // 2. Sidebar Panel into back buffer
             if (g_SidebarX < g_ScreenW) {
-                HDC hdcMem = CreateCompatibleDC(hdc);
+                HDC hdcSb = CreateCompatibleDC(hdcBack);
                 int sbw = g_ScreenW - g_SidebarX;
-                HBITMAP hbmMem = CreateCompatibleBitmap(hdc, sbw, g_ScreenH);
-                HBITMAP hbmOld = (HBITMAP)SelectObject(hdcMem, hbmMem);
+                HBITMAP hbmSb = CreateCompatibleBitmap(hdcBack, sbw, g_ScreenH);
+                HBITMAP hbmSbOld = (HBITMAP)SelectObject(hdcSb, hbmSb);
 
                 RECT sbRect = { 0, 0, sbw, g_ScreenH };
                 HBRUSH wBrush = CreateSolidBrush(RGB(255, 255, 255));
-                FillRect(hdcMem, &sbRect, wBrush);
+                FillRect(hdcSb, &sbRect, wBrush);
                 DeleteObject(wBrush);
 
-                // Header Row (52px, RGB(247,247,247))
+                // Header Row
                 RECT headRect = { 0, 0, sbw, 52 };
                 HBRUSH thBrush = CreateSolidBrush(RGB(247, 247, 247));
-                FillRect(hdcMem, &headRect, thBrush);
+                FillRect(hdcSb, &headRect, thBrush);
                 DeleteObject(thBrush);
                 HPEN borderPen = CreatePen(PS_SOLID, 1, RGB(220, 220, 220));
-                HPEN oldPen = (HPEN)SelectObject(hdcMem, borderPen);
-                MoveToEx(hdcMem, 0, 52, NULL); LineTo(hdcMem, sbw, 52);
-                SelectObject(hdcMem, oldPen); DeleteObject(borderPen);
+                HPEN oldPen = (HPEN)SelectObject(hdcSb, borderPen);
+                MoveToEx(hdcSb, 0, 52, NULL); LineTo(hdcSb, sbw, 52);
+                SelectObject(hdcSb, oldPen); DeleteObject(borderPen);
 
-                SetBkMode(hdcMem, TRANSPARENT);
-                SetTextColor(hdcMem, RGB(40, 40, 40));
+                SetBkMode(hdcSb, TRANSPARENT);
+                SetTextColor(hdcSb, RGB(40, 40, 40));
                 HFONT hFont = CreateFontA(20, 0, 0, 0, FW_BOLD, 0, 0, 0, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Arial");
-                HFONT oldFont = (HFONT)SelectObject(hdcMem, hFont);
+                HFONT oldFont = (HFONT)SelectObject(hdcSb, hFont);
 
                 g_BackBtnRect = { g_SidebarX + 10, 8, g_SidebarX + 10 + 36, 44 };
                 g_CloseBtnRect = { g_ScreenW - 46, 8, g_ScreenW - 10, 44 };
 
                 RECT brect = { 10, 8, 46, 44 };
-                DrawTextA(hdcMem, "<", -1, &brect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
+                DrawTextA(hdcSb, "<", -1, &brect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 RECT crect = { sbw - 46, 8, sbw - 10, 44 };
-                DrawTextA(hdcMem, "X", -1, &crect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
+                DrawTextA(hdcSb, "X", -1, &crect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 RECT trect = { 0, 0, sbw, 52 };
-                DrawTextA(hdcMem, "Gupt", -1, &trect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                SelectObject(hdcMem, oldFont); DeleteObject(hFont);
+                DrawTextA(hdcSb, "Gupt", -1, &trect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SelectObject(hdcSb, oldFont); DeleteObject(hFont);
 
-                // Action cards
-                int cW = (sbw - 42) / 2; // Each 109px wide given 14px padding all around
+                int cW = (sbw - 42) / 2;
                 if (cW > 0) {
                     g_Card1Rect = { g_SidebarX + 14, 66, g_SidebarX + 14 + cW, 66 + 88 };
                     g_Card2Rect = { g_SidebarX + 14 + cW + 14, 66, g_SidebarX + 14 + cW + 14 + cW, 66 + 88 };
 
                     HBRUSH normBrush = CreateSolidBrush(RGB(255, 255, 255));
-                    HBRUSH hovBrush = CreateSolidBrush(RGB(245, 245, 245));
+                    HBRUSH hovBrush  = CreateSolidBrush(RGB(245, 245, 245));
                     HPEN cPen = CreatePen(PS_SOLID, 1, RGB(220, 220, 220));
-                    oldPen = (HPEN)SelectObject(hdcMem, cPen);
-
-                    // Card 1
-                    SelectObject(hdcMem, g_HoveredCard == 1 ? hovBrush : normBrush);
-                    RoundRect(hdcMem, 14, 66, 14 + cW, 66 + 88, 8, 8);
-                    
-                    // Card 2
-                    SelectObject(hdcMem, g_HoveredCard == 2 ? hovBrush : normBrush);
-                    RoundRect(hdcMem, 14 + cW + 14, 66, 14 + cW + 14 + cW, 66 + 88, 8, 8);
-
-                    SelectObject(hdcMem, oldPen); DeleteObject(cPen);
+                    oldPen = (HPEN)SelectObject(hdcSb, cPen);
+                    SelectObject(hdcSb, g_HoveredCard == 1 ? hovBrush : normBrush);
+                    RoundRect(hdcSb, 14, 66, 14 + cW, 66 + 88, 8, 8);
+                    SelectObject(hdcSb, g_HoveredCard == 2 ? hovBrush : normBrush);
+                    RoundRect(hdcSb, 14 + cW + 14, 66, 14 + cW + 14 + cW, 66 + 88, 8, 8);
+                    SelectObject(hdcSb, oldPen); DeleteObject(cPen);
 
                     HFONT cFont = CreateFontA(14, 0, 0, 0, FW_BOLD, 0, 0, 0, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Arial");
-                    oldFont = (HFONT)SelectObject(hdcMem, cFont);
-
-                    SetTextColor(hdcMem, RGB(220, 50, 50));
+                    oldFont = (HFONT)SelectObject(hdcSb, cFont);
+                    SetTextColor(hdcSb, RGB(220, 50, 50));
                     RECT cr1 = { 14, 66, 14 + cW, 66 + 88 };
-                    DrawTextA(hdcMem, "Disconnect", -1, &cr1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-                    SetTextColor(hdcMem, RGB(50, 100, 220));
+                    DrawTextA(hdcSb, "Disconnect", -1, &cr1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    SetTextColor(hdcSb, RGB(50, 100, 220));
                     RECT cr2 = { 14 + cW + 14, 66, 14 + cW + 14 + cW, 66 + 88 };
-                    const char* fsTxt = g_IsFullscreen ? "Exit\nFull-screen" : "Full-screen";
-                    DrawTextA(hdcMem, fsTxt, -1, &cr2, DT_CENTER | DT_VCENTER);
-
-                    SelectObject(hdcMem, oldFont); DeleteObject(cFont);
+                    const char* fsTxt = g_IsFullscreen ? "Exit Full-screen" : "Full-screen";
+                    DrawTextA(hdcSb, fsTxt, -1, &cr2, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    SelectObject(hdcSb, oldFont); DeleteObject(cFont);
                     DeleteObject(normBrush); DeleteObject(hovBrush);
                 }
 
-                BitBlt(hdc, g_SidebarX, 0, sbw, g_ScreenH, hdcMem, 0, 0, SRCCOPY);
-                SelectObject(hdcMem, hbmOld); DeleteObject(hbmMem); DeleteDC(hdcMem);
+                BitBlt(hdcBack, g_SidebarX, 0, sbw, g_ScreenH, hdcSb, 0, 0, SRCCOPY);
+                SelectObject(hdcSb, hbmSbOld); DeleteObject(hbmSb); DeleteDC(hdcSb);
             }
 
-            // 3. Tab Button (Always draw last)
-            g_TabRect.left = g_SidebarX - 22;
-            g_TabRect.right = g_SidebarX;
-            g_TabRect.top = g_ScreenH / 2 - 28;
+            // 3. Tab Button into back buffer
+            g_TabRect.left   = g_SidebarX - 22;
+            g_TabRect.right  = g_SidebarX;
+            g_TabRect.top    = g_ScreenH / 2 - 28;
             g_TabRect.bottom = g_ScreenH / 2 + 28;
 
-            HBRUSH tabBrush = CreateSolidBrush(RGB(45, 45, 45));
-            HBRUSH oldTB = (HBRUSH)SelectObject(hdc, tabBrush);
-            HPEN tPen = CreatePen(PS_NULL, 0, 0);
-            HPEN oldTP = (HPEN)SelectObject(hdc, tPen);
-            RoundRect(hdc, g_TabRect.left, g_TabRect.top, g_TabRect.right + 10, g_TabRect.bottom, 12, 12);
-            SelectObject(hdc, oldTP); DeleteObject(tPen); SelectObject(hdc, oldTB); DeleteObject(tabBrush);
+            {
+                HBRUSH tabBrush = CreateSolidBrush(RGB(45, 45, 45));
+                HBRUSH oldTB = (HBRUSH)SelectObject(hdcBack, tabBrush);
+                HPEN tPen = CreatePen(PS_NULL, 0, 0);
+                HPEN oldTP = (HPEN)SelectObject(hdcBack, tPen);
+                RoundRect(hdcBack, g_TabRect.left, g_TabRect.top, g_TabRect.right + 10, g_TabRect.bottom, 12, 12);
+                SelectObject(hdcBack, oldTP); DeleteObject(tPen);
+                SelectObject(hdcBack, oldTB); DeleteObject(tabBrush);
 
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, RGB(255, 255, 255));
-            HFONT tFont = CreateFontA(16, 0, 0, 0, FW_BOLD, 0, 0, 0, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Arial");
-            HFONT oldTFont = (HFONT)SelectObject(hdc, tFont);
-            RECT tr = { g_TabRect.left, g_TabRect.top, g_TabRect.right, g_TabRect.bottom };
-            const char* chev = g_SidebarOpen ? ">" : "<";
-            DrawTextA(hdc, chev, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            SelectObject(hdc, oldTFont); DeleteObject(tFont);
+                SetBkMode(hdcBack, TRANSPARENT);
+                SetTextColor(hdcBack, RGB(255, 255, 255));
+                HFONT tFont = CreateFontA(16, 0, 0, 0, FW_BOLD, 0, 0, 0, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Arial");
+                HFONT oldTFont = (HFONT)SelectObject(hdcBack, tFont);
+                RECT tr = { g_TabRect.left, g_TabRect.top, g_TabRect.right, g_TabRect.bottom };
+                const char* chev = g_SidebarOpen ? ">" : "<";
+                DrawTextA(hdcBack, chev, -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SelectObject(hdcBack, oldTFont); DeleteObject(tFont);
+            }
+
+            // Final single blit to screen — eliminates all flickering
+            BitBlt(hdc, 0, 0, g_ScreenW, g_ScreenH, hdcBack, 0, 0, SRCCOPY);
+            SelectObject(hdcBack, hbmBackOld); DeleteObject(hbmBack); DeleteDC(hdcBack);
 
             EndPaint(hWnd, &ps);
             break;
@@ -357,7 +365,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     UpdateWindow(hWnd);
 
     g_Client.SetMessageCallback([hWnd](shared::MessageType type, const std::vector<uint8_t>& payload) {
-        thread_local bool t_comInit = (CoInitializeEx(NULL, COINIT_APARTMENTTHREADED) == S_OK || true);
+        // COINIT_MULTITHREADED is required: this runs on a raw std::thread with no message pump.
+        // Apartment-threaded COM requires a message pump; without one, CoCreateInstance (WIC) silently fails.
+        thread_local bool t_comInit = (CoInitializeEx(NULL, COINIT_MULTITHREADED), true);
         if (type == shared::MessageType::ConnectResponse) {
             auto res = reinterpret_cast<const shared::ConnectResponse*>(payload.data());
             if (res->accepted) g_IsConnected = true;
