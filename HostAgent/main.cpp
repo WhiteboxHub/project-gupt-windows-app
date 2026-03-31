@@ -77,16 +77,37 @@ int main() {
     if (server.Start()) {
         std::cout << "Listening on port 8080..." << std::endl;
         
+        CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+
         // MVP: Send frames loop
+        ULONGLONG lastSendDuration = 0;
         while (true) {
             if (g_SessionActive) {
-                std::vector<uint8_t> pixels;
+                if (lastSendDuration > 66) {
+                    // Previous send was slow — skip this frame to drain stale queue
+                    Sleep(33);
+                    lastSendDuration = 0;
+                    continue;
+                }
+
+                ULONGLONG startTime = GetTickCount64();
+
+                std::vector<uint8_t> jpegPixels;
                 uint32_t w, h;
-                if (capturer.CaptureNextFrame(pixels, w, h)) {
+
+                if (capturer.CaptureNextFrameJpeg(jpegPixels, w, h, 70)) {
                     shared::FrameDataHeader header{0, w, h, 32, false, GetTickCount64()};
-                    server.SendRaw(shared::SerializeFrame(header, pixels));
+                    ULONGLONG startSend = GetTickCount64();
+                    server.SendRaw(shared::SerializeFrame(header, jpegPixels));
+                    lastSendDuration = GetTickCount64() - startSend;
+                }
+
+                ULONGLONG elapsed = GetTickCount64() - startTime;
+                if (elapsed < 33) {
+                    Sleep(static_cast<DWORD>(33 - elapsed));
                 }
             } else {
+                lastSendDuration = 0;
                 Sleep(100);
             }
         }

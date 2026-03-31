@@ -79,6 +79,9 @@ void TcpServer::AcceptThread() {
         SOCKET clientSocket = accept(m_ListenSocket, (sockaddr*)&clientAddr, &clientAddrSize);
         
         if (clientSocket != INVALID_SOCKET) {
+            int flag = 1;
+            setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+            
             if (m_ClientSocket != INVALID_SOCKET) {
                 closesocket(m_ClientSocket);
             }
@@ -91,6 +94,7 @@ void TcpServer::AcceptThread() {
 void TcpServer::ReceiveThread() {
     std::vector<uint8_t> buffer(65536); // Use a larger chunk size
     std::vector<uint8_t> messageBuffer;
+    size_t readPos = 0;
 
     while (m_IsRunning && m_ClientSocket != INVALID_SOCKET) {
         int bytesReceived = recv(m_ClientSocket, reinterpret_cast<char*>(buffer.data()), static_cast<int>(buffer.size()), 0);
@@ -98,8 +102,8 @@ void TcpServer::ReceiveThread() {
         if (bytesReceived > 0) {
             messageBuffer.insert(messageBuffer.end(), buffer.begin(), buffer.begin() + bytesReceived);
 
-            while (messageBuffer.size() >= sizeof(shared::MessageHeader)) {
-                shared::MessageHeader* header = reinterpret_cast<shared::MessageHeader*>(messageBuffer.data());
+            while (messageBuffer.size() - readPos >= sizeof(shared::MessageHeader)) {
+                shared::MessageHeader* header = reinterpret_cast<shared::MessageHeader*>(messageBuffer.data() + readPos);
                 uint32_t totalMessageSize = sizeof(shared::MessageHeader) + header->payloadSize;
 
                 // Sanity check preventing OOM crashes on broken streams
@@ -109,19 +113,24 @@ void TcpServer::ReceiveThread() {
                     break;
                 }
 
-                if (messageBuffer.size() >= totalMessageSize) {
+                if (messageBuffer.size() - readPos >= totalMessageSize) {
                     // Extract strictly the payload, omitting the header bytes!
-                    std::vector<uint8_t> msgData(messageBuffer.begin() + sizeof(shared::MessageHeader), messageBuffer.begin() + totalMessageSize);
+                    std::vector<uint8_t> msgData(messageBuffer.data() + readPos + sizeof(shared::MessageHeader), messageBuffer.data() + readPos + totalMessageSize);
                     
                     if (m_Callback) {
                         m_Callback(header->type, msgData);
                     }
 
-                    messageBuffer.erase(messageBuffer.begin(), messageBuffer.begin() + totalMessageSize);
+                    readPos += totalMessageSize;
                 } else {
                     // Not enough bytes yet, wait for next recv
                     break;
                 }
+            }
+
+            if (readPos > messageBuffer.size() / 2) {
+                messageBuffer.erase(messageBuffer.begin(), messageBuffer.begin() + readPos);
+                readPos = 0;
             }
         } else if (bytesReceived == 0 || bytesReceived == SOCKET_ERROR) {
             closesocket(m_ClientSocket);
@@ -161,6 +170,9 @@ bool TcpClient::Connect(const std::string& host, uint16_t port) {
         return false;
     }
 
+    int flag = 1;
+    setsockopt(m_Socket, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+
     m_IsConnected = true;
     std::thread(&TcpClient::ReceiveThread, this).detach();
     return true;
@@ -192,6 +204,7 @@ bool TcpClient::SendRaw(const std::vector<uint8_t>& data) {
 void TcpClient::ReceiveThread() {
     std::vector<uint8_t> buffer(65536);
     std::vector<uint8_t> messageBuffer;
+    size_t readPos = 0;
 
     while (m_IsConnected && m_Socket != INVALID_SOCKET) {
         int bytesReceived = recv(m_Socket, reinterpret_cast<char*>(buffer.data()), static_cast<int>(buffer.size()), 0);
@@ -199,8 +212,8 @@ void TcpClient::ReceiveThread() {
         if (bytesReceived > 0) {
             messageBuffer.insert(messageBuffer.end(), buffer.begin(), buffer.begin() + bytesReceived);
 
-            while (messageBuffer.size() >= sizeof(shared::MessageHeader)) {
-                shared::MessageHeader* header = reinterpret_cast<shared::MessageHeader*>(messageBuffer.data());
+            while (messageBuffer.size() - readPos >= sizeof(shared::MessageHeader)) {
+                shared::MessageHeader* header = reinterpret_cast<shared::MessageHeader*>(messageBuffer.data() + readPos);
                 uint32_t totalMessageSize = sizeof(shared::MessageHeader) + header->payloadSize;
 
                 if (totalMessageSize > 150000000) { // Increased tolerance to 150MB just in case
@@ -208,18 +221,23 @@ void TcpClient::ReceiveThread() {
                     break;
                 }
 
-                if (messageBuffer.size() >= totalMessageSize) {
+                if (messageBuffer.size() - readPos >= totalMessageSize) {
                     // Extract strictly the payload, omitting the header bytes!
-                    std::vector<uint8_t> msgData(messageBuffer.begin() + sizeof(shared::MessageHeader), messageBuffer.begin() + totalMessageSize);
+                    std::vector<uint8_t> msgData(messageBuffer.data() + readPos + sizeof(shared::MessageHeader), messageBuffer.data() + readPos + totalMessageSize);
                     
                     if (m_Callback) {
                         m_Callback(header->type, msgData);
                     }
 
-                    messageBuffer.erase(messageBuffer.begin(), messageBuffer.begin() + totalMessageSize);
+                    readPos += totalMessageSize;
                 } else {
                     break;
                 }
+            }
+            
+            if (readPos > messageBuffer.size() / 2) {
+                messageBuffer.erase(messageBuffer.begin(), messageBuffer.begin() + readPos);
+                readPos = 0;
             }
         } else if (bytesReceived == 0 || bytesReceived == SOCKET_ERROR) {
             Disconnect();
