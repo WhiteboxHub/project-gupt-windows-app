@@ -37,5 +37,9 @@
 *.out
 *.app
 
-# debug information files
 *.dwo
+
+# Project Config
+.vs/
+build/
+SignalingServer/node_modules/
