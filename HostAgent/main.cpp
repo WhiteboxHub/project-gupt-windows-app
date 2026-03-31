@@ -84,23 +84,24 @@ int main() {
         while (true) {
             if (g_SessionActive) {
                 if (lastSendDuration > 66) {
+                    // Previous send was slow — skip this frame to drain stale queue
                     Sleep(33);
                     lastSendDuration = 0;
                     continue;
                 }
 
                 ULONGLONG startTime = GetTickCount64();
-                
-                std::vector<uint8_t> pixels;
+
+                std::vector<uint8_t> jpegPixels;
                 uint32_t w, h;
-                
-                if (capturer.CaptureNextFrame(pixels, w, h)) {
+
+                if (capturer.CaptureNextFrameJpeg(jpegPixels, w, h, 40)) {
                     shared::FrameDataHeader header{0, w, h, 32, false, GetTickCount64()};
                     ULONGLONG startSend = GetTickCount64();
-                    server.SendRaw(shared::SerializeFrame(header, pixels));
+                    server.SendRaw(shared::SerializeFrame(header, jpegPixels));
                     lastSendDuration = GetTickCount64() - startSend;
                 }
-                
+
                 ULONGLONG elapsed = GetTickCount64() - startTime;
                 if (elapsed < 33) {
                     Sleep(static_cast<DWORD>(33 - elapsed));
