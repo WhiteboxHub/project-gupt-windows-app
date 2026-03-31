@@ -10,7 +10,7 @@ if(NOT WIN32)
 endif()
 
 # Group core dependencies
-set(WINDOWS_LIBS d3d11 dxgi ws2_32 user32)
+set(WINDOWS_LIBS d3d11 dxgi ws2_32 user32 gdi32 msimg32)
 
 # Include directories
 set(CORE_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR})
@@ -31,7 +31,7 @@ target_link_libraries(HostAgent PRIVATE ${WINDOWS_LIBS})
 set_property(TARGET HostAgent PROPERTY FOLDER "Applications")
 
 # ==== Add Client Viewer ====
-add_executable(ClientViewer 
+add_executable(ClientViewer WIN32 
     ClientViewer/main.cpp
     Shared/Protocol.h
     Core/Network/TcpNetwork.h
