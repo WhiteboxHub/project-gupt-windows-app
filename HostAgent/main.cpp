@@ -95,7 +95,7 @@ int main() {
                 std::vector<uint8_t> jpegPixels;
                 uint32_t w, h;
 
-                if (capturer.CaptureNextFrameJpeg(jpegPixels, w, h, 70)) {
+                if (capturer.CaptureNextFrameJpeg(jpegPixels, w, h, 85)) {
                     shared::FrameDataHeader header{0, w, h, 32, false, GetTickCount64()};
                     ULONGLONG startSend = GetTickCount64();
                     server.SendRaw(shared::SerializeFrame(header, jpegPixels));
