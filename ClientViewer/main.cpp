@@ -69,7 +69,23 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hWnd, &ps);
 
-            // Reuse persistent back buffer — only (re)create when window size changes
+            // Always read the TRUE current client rect — never trust stale g_ScreenW/H
+            // (cross-resolution connections, DPI changes, window transitions can all
+            //  cause WM_SIZE to lag behind the actual paint size)
+            {
+                RECT cr; GetClientRect(hWnd, &cr);
+                int actualW = cr.right;
+                int actualH = cr.bottom;
+                if (actualW > 0 && actualH > 0 && (actualW != g_ScreenW || actualH != g_ScreenH)) {
+                    g_ScreenW = actualW;
+                    g_ScreenH = actualH;
+                    // Reposition sidebar snap immediately
+                    g_SidebarX = g_SidebarOpen ? g_ScreenW - 260 : g_ScreenW;
+                }
+            }
+            if (g_ScreenW < 1 || g_ScreenH < 1) { EndPaint(hWnd, &ps); break; }
+
+            // Reuse persistent back buffer — (re)create only when dimensions change
             if (!g_BackDC || g_BackW != g_ScreenW || g_BackH != g_ScreenH) {
                 if (g_BackDC) { SelectObject(g_BackDC, GetStockObject(BLACK_BRUSH)); DeleteObject(g_BackBmp); DeleteDC(g_BackDC); }
                 g_BackDC  = CreateCompatibleDC(hdc);
@@ -78,6 +94,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 g_BackW = g_ScreenW; g_BackH = g_ScreenH;
             }
             HDC hdcBack = g_BackDC;
+
 
             // 1. Remote Frame (StretchDIBits into back buffer)
             {
