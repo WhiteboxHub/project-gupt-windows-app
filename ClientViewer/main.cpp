@@ -127,8 +127,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     bmi.bmiHeader.biPlanes = 1;
                     bmi.bmiHeader.biBitCount = 32;
                     bmi.bmiHeader.biCompression = BI_RGB;
-                    // COLORONCOLOR is ~10x faster than HALFTONE; sufficient for remote desktop
-                    SetStretchBltMode(hdcBack, COLORONCOLOR);
+                    // HALFTONE averages pixel blocks when scaling — essential for cross-resolution
+                    // connections (host 1920x1080 → client 1366x768). COLORONCOLOR drops pixels
+                    // randomly which looks terrible on downsample. HALFTONE is GDI's best mode.
+                    SetStretchBltMode(hdcBack, HALFTONE);
+                    SetBrushOrgEx(hdcBack, 0, 0, NULL); // Required after HALFTONE per MSDN
 
                     StretchDIBits(hdcBack, g_DestX, g_DestY, g_DestW, g_DestH,
                                   0, 0, g_FrameWidth, g_FrameHeight,
@@ -426,6 +429,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 }
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    // MUST be first: tells Windows this app handles DPI itself.
+    // Without this, on 125%/150% DPI laptops:
+    //   - GetSystemMetrics returns logical (scaled-down) pixels
+    //   - Host captures at different coordinates than client expects
+    //   - Windows auto-blurs our GDI output to compensate for DPI scaling
+    // With this: all coordinates are physical pixels, consistent across all machines.
+    SetProcessDPIAware();
+
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
     WNDCLASSA wc = {}; 
