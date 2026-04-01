@@ -33,6 +33,8 @@ RECT g_Card1Rect = { 0, 0, 0, 0 };
 RECT g_Card2Rect = { 0, 0, 0, 0 };
 RECT g_BackBtnRect = { 0, 0, 0, 0 };
 RECT g_CloseBtnRect = { 0, 0, 0, 0 };
+RECT g_MinBtnRect = { 0, 0, 0, 0 };   // Minimize button (windowed mode only)
+RECT g_MaxBtnRect = { 0, 0, 0, 0 };   // Maximize button (windowed mode only)
 
 // Cached persistent back buffer (created once, reused every frame — avoids per-frame alloc)
 HDC    g_BackDC  = NULL;
@@ -148,13 +150,29 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 HFONT hFont = CreateFontA(20, 0, 0, 0, FW_BOLD, 0, 0, 0, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Arial");
                 HFONT oldFont = (HFONT)SelectObject(hdcSb, hFont);
 
-                g_BackBtnRect = { g_SidebarX + 10, 8, g_SidebarX + 10 + 36, 44 };
-                g_CloseBtnRect = { g_ScreenW - 46, 8, g_ScreenW - 10, 44 };
+                g_BackBtnRect  = { g_SidebarX + 10, 8, g_SidebarX + 46, 44 };
+                g_CloseBtnRect = { g_ScreenW - 46,  8, g_ScreenW - 10, 44 };
 
                 RECT brect = { 10, 8, 46, 44 };
                 DrawTextA(hdcSb, "<", -1, &brect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 RECT crect = { sbw - 46, 8, sbw - 10, 44 };
                 DrawTextA(hdcSb, "X", -1, &crect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+                // Minimize (_) and Maximize (□) only visible in windowed mode
+                if (!g_IsFullscreen) {
+                    // Max button: left of X
+                    g_MaxBtnRect = { g_ScreenW - 90, 8, g_ScreenW - 50, 44 };
+                    RECT maxR = { sbw - 90, 8, sbw - 50, 44 };
+                    DrawTextA(hdcSb, "\x5B\x5D", -1, &maxR, DT_CENTER | DT_VCENTER | DT_SINGLELINE); // []
+                    // Min button: left of Max
+                    g_MinBtnRect = { g_ScreenW - 134, 8, g_ScreenW - 94, 44 };
+                    RECT minR = { sbw - 134, 8, sbw - 94, 44 };
+                    DrawTextA(hdcSb, "_", -1, &minR, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                } else {
+                    g_MinBtnRect = {0,0,0,0};
+                    g_MaxBtnRect = {0,0,0,0};
+                }
+
                 RECT trect = { 0, 0, sbw, 52 };
                 DrawTextA(hdcSb, "Gupt", -1, &trect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                 SelectObject(hdcSb, oldFont); DeleteObject(hFont);
@@ -281,6 +299,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         SetTimer(hWnd, 1, 10, NULL);
                         return 0;
                     }
+                    // Minimize / Maximize (windowed mode only)
+                    if (!g_IsFullscreen && PtInRect(&g_MinBtnRect, pt)) {
+                        ShowWindow(hWnd, SW_MINIMIZE);
+                        g_SidebarOpen = false; SetTimer(hWnd, 1, 10, NULL);
+                        return 0;
+                    }
+                    if (!g_IsFullscreen && PtInRect(&g_MaxBtnRect, pt)) {
+                        ShowWindow(hWnd, IsZoomed(hWnd) ? SW_RESTORE : SW_MAXIMIZE);
+                        g_SidebarOpen = false; SetTimer(hWnd, 1, 10, NULL);
+                        return 0;
+                    }
                     if (PtInRect(&g_Card1Rect, pt)) {
                         g_Client.Disconnect(); PostQuitMessage(0); return 0;
                     }
@@ -288,17 +317,19 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         g_IsFullscreen = !g_IsFullscreen;
                         if (g_IsFullscreen) {
                             GetWindowRect(hWnd, &g_SavedRect);
-                            SetWindowLongPtrA(hWnd, GWL_STYLE, WS_POPUP | WS_VISIBLE | WS_EX_TOOLWINDOW);
-                            SetWindowPos(hWnd, HWND_TOP, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), SWP_SHOWWINDOW);
+                            SetWindowLongPtrA(hWnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+                            SetWindowLongPtrA(hWnd, GWL_EXSTYLE, WS_EX_TOOLWINDOW); // hide from Alt+Tab in fullscreen
+                            SetWindowPos(hWnd, HWND_TOP, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), SWP_SHOWWINDOW | SWP_FRAMECHANGED);
                         } else {
                             SetWindowLongPtrA(hWnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
-                            SetWindowPos(hWnd, HWND_TOP, g_SavedRect.left, g_SavedRect.top, g_SavedRect.right - g_SavedRect.left, g_SavedRect.bottom - g_SavedRect.top, SWP_SHOWWINDOW);
+                            SetWindowLongPtrA(hWnd, GWL_EXSTYLE, WS_EX_APPWINDOW); // show in Alt+Tab/taskbar
+                            SetWindowPos(hWnd, HWND_NOTOPMOST, g_SavedRect.left, g_SavedRect.top, g_SavedRect.right - g_SavedRect.left, g_SavedRect.bottom - g_SavedRect.top, SWP_SHOWWINDOW | SWP_FRAMECHANGED);
                         }
                         g_SidebarOpen = false;
                         SetTimer(hWnd, 1, 10, NULL);
                         return 0;
                     }
-                    return 0; // Click inside sidebar nowhere meaningful
+                    return 0; // Click inside sidebar but not on any control
                 } else if (g_SidebarOpen && x < g_SidebarX) {
                     g_SidebarOpen = false;
                     SetTimer(hWnd, 1, 10, NULL);
@@ -328,11 +359,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 g_IsFullscreen = !g_IsFullscreen;
                 if (g_IsFullscreen) {
                     GetWindowRect(hWnd, &g_SavedRect);
-                    SetWindowLongPtrA(hWnd, GWL_STYLE, WS_POPUP | WS_VISIBLE | WS_EX_TOOLWINDOW);
-                    SetWindowPos(hWnd, HWND_TOP, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), SWP_SHOWWINDOW);
+                    SetWindowLongPtrA(hWnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+                    SetWindowLongPtrA(hWnd, GWL_EXSTYLE, WS_EX_TOOLWINDOW);
+                    SetWindowPos(hWnd, HWND_TOP, 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), SWP_SHOWWINDOW | SWP_FRAMECHANGED);
                 } else {
                     SetWindowLongPtrA(hWnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
-                    SetWindowPos(hWnd, HWND_TOP, g_SavedRect.left, g_SavedRect.top, g_SavedRect.right - g_SavedRect.left, g_SavedRect.bottom - g_SavedRect.top, SWP_SHOWWINDOW);
+                    SetWindowLongPtrA(hWnd, GWL_EXSTYLE, WS_EX_APPWINDOW);
+                    SetWindowPos(hWnd, HWND_NOTOPMOST, g_SavedRect.left, g_SavedRect.top, g_SavedRect.right - g_SavedRect.left, g_SavedRect.bottom - g_SavedRect.top, SWP_SHOWWINDOW | SWP_FRAMECHANGED);
                 }
                 g_SidebarOpen = false;
                 SetTimer(hWnd, 1, 10, NULL);
@@ -358,6 +391,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             InvalidateRect(hWnd, NULL, FALSE);
             break;
         }
+        case WM_CLOSE:
+            // Alt+F4 or system close: disconnect properly instead of abrupt kill
+            g_Client.Disconnect();
+            PostQuitMessage(0);
+            return 0;
+        case WM_ACTIVATE:
+            // When deactivated by Alt+Tab: keep running, do not close.
+            // If becoming active again while fullscreen, ensure we stay on top.
+            if (LOWORD(wParam) != WA_INACTIVE && g_IsFullscreen)
+                SetWindowPos(hWnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            return 0;
         case WM_DESTROY: PostQuitMessage(0); break;
         default: return DefWindowProc(hWnd, message, wParam, lParam);
     }
