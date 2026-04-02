@@ -13,7 +13,8 @@ enum class MessageType : uint8_t {
     MouseEvent = 4,
     KeyboardEvent = 5,
     Heartbeat = 6,
-    Disconnect = 7
+    Disconnect = 7,
+    ClipboardData = 8   // UTF-8 clipboard text sync (client ↔ host)
 };
 
 #pragma pack(push, 1) // Ensure no padding for raw struct serialization
@@ -57,6 +58,18 @@ struct KeyboardEvent {
 };
 
 #pragma pack(pop)
+
+// Clipboard: variable-length UTF-8 text — no fixed struct, raw bytes follow the header
+inline std::vector<uint8_t> SerializeClipboard(const std::string& utf8Text) {
+    uint32_t textLen = static_cast<uint32_t>(utf8Text.size());
+    std::vector<uint8_t> buffer(sizeof(MessageHeader) + textLen);
+    MessageHeader* hdr = reinterpret_cast<MessageHeader*>(buffer.data());
+    hdr->type = MessageType::ClipboardData;
+    hdr->payloadSize = textLen;
+    if (textLen > 0)
+        std::memcpy(buffer.data() + sizeof(MessageHeader), utf8Text.data(), textLen);
+    return buffer;
+}
 
 // Utility function to serialize structs (MVP binary serialization)
 template<typename T>

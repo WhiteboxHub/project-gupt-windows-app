@@ -20,6 +20,7 @@ public:
 
     bool Initialize();
     bool CaptureNextFrame(std::vector<uint8_t>& outPixels, uint32_t& outWidth, uint32_t& outHeight);
+    bool CaptureNextFrameJpeg(std::vector<uint8_t>& outJpeg, uint32_t& outWidth, uint32_t& outHeight, int quality);
     void ReleaseFrame();
 
 private:
