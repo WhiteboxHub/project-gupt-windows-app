@@ -1,65 +1,167 @@
 # Gupt Remote Desktop (Windows App)
 
-Gupt Remote Desktop is a minimalist, MVP-stage remote desktop and screen-sharing application designed exclusively for Windows. It utilizes native Win32 APIs (GDI, SendInput) to provide reliable screen capture and input injection capabilities across any environment.
+Gupt Remote Desktop is a lightweight, self-contained remote desktop application for Windows. It uses native Win32 APIs (GDI, SendInput) for screen capture and input injection — **no third-party libraries, no runtimes**. The entire application ships as a single portable `.exe`.
+
+---
 
 ## Architecture
 
-This project consists of three primary components:
+```
+project-gupt-windows-app/
+├── Launcher/         ← Unified GUI launcher (Host + Client in one .exe)
+├── HostAgent/        ← Legacy standalone host (dev/testing only)
+├── ClientViewer/     ← Legacy standalone client (dev/testing only)
+├── Core/
+│   ├── Capture/      ← GDI-based JPEG screen capturer
+│   ├── Input/        ← Win32 SendInput mouse/keyboard injector
+│   └── Network/      ← Raw TCP framing layer
+├── Shared/           ← Protocol definitions (message types, serialization)
+└── SignalingServer/  ← Node.js WebSocket server (reserved for WebRTC)
+```
 
-1. **HostAgent (C++):** A Windows executable running on the machine to be controlled. It captures the screen using GDI BitBlt, injects simulated keyboard and mouse events using Win32 `SendInput`, and ensures security by prompting the user for consent before allowing remote control.
-2. **ClientViewer (C++):** A Windows executable used by the controller to connect to the HostAgent, view its screen stream via a native Win32 window, and capture local inputs to send to the host.
-3. **Signaling Server (Node.js):** A WebSocket server designed for future WebRTC signaling. (Currently, the C++ applications use a direct raw TCP connection for MVP).
+### Components
+
+| Target | Description |
+|---|---|
+| **`Gupt.exe`** | ✅ **Recommended.** Single portable executable. Launches a GUI dialog to choose Host or Client mode. Statically linked — runs on any Windows PC with no dependencies. |
+| `HostAgent.exe` | Legacy dev binary. Runs host-only in a console window (no launcher UI). |
+| `ClientViewer.exe` | Legacy dev binary. Runs client-only; IP is hardcoded (for dev use). |
+
+---
 
 ## Prerequisites
 
-- **Windows OS**: This project uses native Windows APIs and will not compile on macOS or Linux.
-- **CMake**: Version 3.20 or newer.
-- **C++17 Compiler**: MSVC (Visual Studio) is recommended.
+- **Windows 10/11** (Win32 APIs used: GDI, SendInput, WIC, DirectX)
+- **CMake** 3.20 or newer
+- **MSVC** (Visual Studio 2019 or later with "Desktop development with C++" workload)
+
+> **No external libraries required.** The build uses only Windows SDK APIs.
+
+---
 
 ## How to Build
 
-You can build the `HostAgent` and `ClientViewer` using CMake from the root of the Windows app project.
+Run from the `project-gupt-windows-app/` directory:
 
-```cmd
-# Create a build directory
-mkdir build
-cd build
+```powershell
+# Configure (auto-detects installed Visual Studio generator)
+cmake -S . -B build
 
-# Configure the project
-cmake ..
+# Build the unified launcher (recommended)
+cmake --build build --target Gupt --config Release
 
-# Build both applications (Release or Debug)
-cmake --build . --config Release
+# Or build everything (Gupt + legacy HostAgent + ClientViewer)
+cmake --build build --config Release
 ```
+
+Output binaries are written to:
+```
+build/Release/Gupt.exe          ← Main distributable (~240 KB, self-contained)
+build/Release/HostAgent.exe     ← Legacy host binary
+build/Release/ClientViewer.exe  ← Legacy client binary
+```
+
+> **Static linking** is enabled via `CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded"`.  
+> `Gupt.exe` does **not** require the Visual C++ Redistributable to be installed on the target machine.
+
+---
+
+## How to Run — Using Gupt.exe (Recommended)
+
+Just copy `Gupt.exe` to any Windows PC and double-click it.
+
+A launcher dialog will appear:
+
+```
+┌──────────────────────────────────────────┐
+│  Gupt Remote Desktop                     │
+│  Secure, lightweight screen sharing      │
+│                                          │
+│  SELECT MODE                             │
+│  ● Host (Share my screen)                │
+│  ○ Client (View remote screen)           │
+│                                          │
+│  [Host IP Address input — Client only]   │
+│                                          │
+│  [  Launch Gupt  ]     [  Cancel  ]      │
+└──────────────────────────────────────────┘
+```
+
+### Host Machine (the PC being shared)
+
+1. Run `Gupt.exe`
+2. Select **"Host (Share my screen)"**
+3. Click **Launch Gupt**
+4. Find the machine's IP address:
+   ```powershell
+   ipconfig
+   # Look for: IPv4 Address . . . . : 192.168.x.x
+   ```
+5. Share that IP with the person who will connect.
+6. When a client connects, a consent dialog will appear — click **Yes** to allow the session.
+7. A **Windows Firewall prompt** may appear on first run — click **Allow Access**.
+
+### Client Machine (the PC doing the viewing/controlling)
+
+1. Run `Gupt.exe`
+2. Select **"Client (View remote screen)"**
+3. Enter the **Host's IP address** in the input field (e.g. `192.168.1.15`)
+4. Click **Launch Gupt**
+5. Once the host accepts, their desktop streams into a fullscreen window.
+
+#### Client Controls
+
+| Key / Action | Function |
+|---|---|
+| Click the `<` tab on the right edge | Open/close sidebar |
+| **Disconnect** (sidebar card) | End session and close |
+| **Full-screen / Exit Full-screen** (sidebar card) | Toggle fullscreen |
+| `F11` | Toggle fullscreen |
+| Mouse move / click / scroll inside the frame | Injected on host machine |
+| Keyboard input | Injected on host machine |
+
+---
 
 ## How to Test on a Single Computer (Localhost)
 
-If you have built both applications on the same computer, you can test them together locally.
+You can run both host and client on the same machine for testing:
 
-1. **Start the Host:** 
-   Open a terminal and run `.\build\Release\HostAgent.exe`. It will begin listening on port 8080.
-2. **Start the Client:** 
-   Open a second terminal and run `.\build\Release\ClientViewer.exe`. It will connect to localhost `127.0.0.1` by default.
-3. **Accept Connection:** 
-   The Host will display a security dialog prompting you to grant permission. Click "Yes".
-4. **Testing Inputs:** 
-   *Note: Testing on a single monitor creates an "infinite mirror" effect.* To successfully test remote control, drag the ClientViewer window to the side so you can see your physical desktop behind it. Click deeply inside the ClientViewer's video feed, and watch your physical mouse cursor teleport and click the real item!
+1. Run `Gupt.exe` → select **Host** → Launch
+2. Run a **second instance** of `Gupt.exe` → select **Client** → enter `127.0.0.1` → Launch
+3. Accept the consent dialog on the Host.
 
-## How to Control Another Computer over the Network
+> ⚠️ On a single monitor this creates an "infinite mirror" effect. Drag the client window to the side to see your real desktop behind it. Mouse clicks inside the client feed will land on the real desktop.
 
-To cleanly control a secondary computer over your local network:
+---
 
-1. **Host Setup (The controlled PC):**
-   - Copy `HostAgent.exe` to the other computer.
-   - Run `ipconfig` in PowerShell on that machine to find its `IPv4 Address` (e.g. `192.168.1.15`).
-   - Start `HostAgent.exe`. **Important:** If Windows Defender Firewall prompts you, make sure to click **Allow Access** or the incoming connection will be blocked.
-2. **Client Setup (The controlling PC):**
-   - Open PowerShell on your main PC.
-   - Run the Client application and pass the Host's IP address as an argument:
-     ```cmd
-     .\build\Release\ClientViewer.exe 192.168.1.15
-     ```
-3. Once the person at the Host PC clicks "Yes" to accept your connection, their desktop will appear in your Client window. Any keystrokes or mouse clicks you perform inside the window will instantly happen on their machine!
+## Distributing the Application
+
+To share the app with another machine:
+
+- Copy **only `Gupt.exe`** — nothing else is needed.
+- No installer, no runtime setup, no Visual C++ Redistributable.
+- Works on: Windows 10, Windows 11 (x64).
+
+---
 
 ## Security
-The `HostAgent` forces a user consent prompt before any peer can connect, fulfilling the security constraint that a remote session cannot be silently initiated. A console indicator remains active during the active session.
+
+- The **Host always shows a consent dialog** before any remote session begins. A session cannot be silently started.
+- An active session indicator remains visible while a remote peer is connected.
+- All input is injected only after explicit user approval.
+
+---
+
+## Legacy Build Targets (Dev Only)
+
+If you need to build the old split binaries separately:
+
+```powershell
+# Host only
+cmake --build build --target HostAgent --config Release
+
+# Client only
+cmake --build build --target ClientViewer --config Release
+```
+
+> The `ClientViewer` legacy binary has the host IP hardcoded inside `ClientViewer/main.cpp` (line ~504). Edit `g_Client.Connect(...)` before building if you need a specific IP.

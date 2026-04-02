@@ -31,6 +31,10 @@ void ShowSessionIndicatorThread() {
 }
 
 int main() {
+    // Physical pixel coordinates: without this, GDI on a DPI-scaled host captures
+    // at logical (scaled) resolution and mouse injection hits wrong positions.
+    SetProcessDPIAware();
+
     std::cout << "Starting Gupt Host Agent..." << std::endl;
 
     gupt::core::network::TcpServer server(8080);
