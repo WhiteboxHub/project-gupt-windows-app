@@ -14,7 +14,8 @@ enum class MessageType : uint8_t {
     KeyboardEvent = 5,
     Heartbeat = 6,
     Disconnect = 7,
-    ClipboardData = 8   // UTF-8 clipboard text sync (client ↔ host)
+    ClipboardText = 8,  // UTF-8 clipboard text sync
+    ClipboardImage = 9  // Binary clipboard Image (BMP/DIB) sync
 };
 
 #pragma pack(push, 1) // Ensure no padding for raw struct serialization
@@ -60,14 +61,26 @@ struct KeyboardEvent {
 #pragma pack(pop)
 
 // Clipboard: variable-length UTF-8 text — no fixed struct, raw bytes follow the header
-inline std::vector<uint8_t> SerializeClipboard(const std::string& utf8Text) {
+inline std::vector<uint8_t> SerializeClipboardText(const std::string& utf8Text) {
     uint32_t textLen = static_cast<uint32_t>(utf8Text.size());
     std::vector<uint8_t> buffer(sizeof(MessageHeader) + textLen);
     MessageHeader* hdr = reinterpret_cast<MessageHeader*>(buffer.data());
-    hdr->type = MessageType::ClipboardData;
+    hdr->type = MessageType::ClipboardText;
     hdr->payloadSize = textLen;
     if (textLen > 0)
         std::memcpy(buffer.data() + sizeof(MessageHeader), utf8Text.data(), textLen);
+    return buffer;
+}
+
+// Clipboard Image: variable-length DIB/pixels
+inline std::vector<uint8_t> SerializeClipboardImage(const std::vector<uint8_t>& dibData) {
+    uint32_t imgLen = static_cast<uint32_t>(dibData.size());
+    std::vector<uint8_t> buffer(sizeof(MessageHeader) + imgLen);
+    MessageHeader* hdr = reinterpret_cast<MessageHeader*>(buffer.data());
+    hdr->type = MessageType::ClipboardImage;
+    hdr->payloadSize = imgLen;
+    if (imgLen > 0)
+        std::memcpy(buffer.data() + sizeof(MessageHeader), dibData.data(), imgLen);
     return buffer;
 }
 

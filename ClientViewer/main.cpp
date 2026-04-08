@@ -6,6 +6,7 @@
 #include <mutex>
 #include <wincodec.h>
 #include <shlwapi.h>
+#include <shellapi.h>
 #include "../Shared/Protocol.h"
 #include "../Core/Network/TcpNetwork.h"
 
@@ -31,16 +32,35 @@ int g_HoveredCard = -1;
 RECT g_TabRect = { 0, 0, 0, 0 };
 RECT g_Card1Rect = { 0, 0, 0, 0 };
 RECT g_Card2Rect = { 0, 0, 0, 0 };
+RECT g_Card3Rect = { 0, 0, 0, 0 };
 RECT g_BackBtnRect = { 0, 0, 0, 0 };
 RECT g_CloseBtnRect = { 0, 0, 0, 0 };
-RECT g_MinBtnRect = { 0, 0, 0, 0 };   // Minimize button (windowed mode only)
-RECT g_MaxBtnRect = { 0, 0, 0, 0 };   // Maximize button (windowed mode only)
+RECT g_MinBtnRect = { 0, 0, 0, 0 };
+RECT g_MaxBtnRect = { 0, 0, 0, 0 };
+
+static void DrawBrandingLogo(HDC hdc, int x, int y, int size, COLORREF color) {
+    HPEN hPen = CreatePen(PS_SOLID, 2, color);
+    HPEN hOld = (HPEN)SelectObject(hdc, hPen);
+    int w = size, h = (int)(size * 0.58f);
+    POINT p[7];
+    p[0] = { x + w / 2, y }; p[1] = { x + w, y + h / 2 };
+    p[2] = { x + w, y + h + h / 2 }; p[3] = { x + w / 2, y + h * 2 };
+    p[4] = { x, y + h + h / 2 }; p[5] = { x, y + h / 2 }; p[6] = { x + w / 2, y + h };
+    MoveToEx(hdc, p[0].x, p[0].y, NULL); LineTo(hdc, p[1].x, p[1].y); LineTo(hdc, p[6].x, p[6].y); LineTo(hdc, p[5].x, p[5].y); LineTo(hdc, p[0].x, p[0].y);
+    MoveToEx(hdc, p[1].x, p[1].y, NULL); LineTo(hdc, p[2].x, p[2].y); LineTo(hdc, p[3].x, p[3].y); LineTo(hdc, p[6].x, p[6].y);
+    MoveToEx(hdc, p[5].x, p[5].y, NULL); LineTo(hdc, p[4].x, p[4].y); LineTo(hdc, p[3].x, p[3].y);
+    SelectObject(hdc, hOld); DeleteObject(hPen);
+}
 
 // Cached persistent back buffer (created once, reused every frame — avoids per-frame alloc)
 HDC    g_BackDC  = NULL;
 HBITMAP g_BackBmp = NULL;
 int    g_BackW   = 0;
 int    g_BackH   = 0;
+
+// Clipboard Sync Globals
+std::string g_LastFromHost;
+std::string g_LastSent;
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
@@ -193,34 +213,47 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     g_MaxBtnRect = {0,0,0,0};
                 }
 
-                RECT trect = { 0, 0, sbw, 52 };
-                DrawTextA(hdcSb, "Gupt", -1, &trect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                // Logo or Header Text
+                DrawBrandingLogo(hdcSb, (sbw - 30) / 2, 8, 30, RGB(40, 40, 40));
+                
                 SelectObject(hdcSb, oldFont); DeleteObject(hFont);
 
-                int cW = (sbw - 42) / 2;
+                int cW = sbw - 28;
                 if (cW > 0) {
-                    g_Card1Rect = { g_SidebarX + 14, 66, g_SidebarX + 14 + cW, 66 + 88 };
-                    g_Card2Rect = { g_SidebarX + 14 + cW + 14, 66, g_SidebarX + 14 + cW + 14 + cW, 66 + 88 };
+                    g_Card1Rect = { g_SidebarX + 14, 66, g_SidebarX + 14 + cW, 66 + 60 };
+                    g_Card2Rect = { g_SidebarX + 14, 66 + 74, g_SidebarX + 14 + cW, 66 + 74 + 60 };
+                    g_Card3Rect = { g_SidebarX + 14, 66 + 74 + 74, g_SidebarX + 14 + cW, 66 + 74 + 74 + 60 };
 
                     HBRUSH normBrush = CreateSolidBrush(RGB(255, 255, 255));
                     HBRUSH hovBrush  = CreateSolidBrush(RGB(245, 245, 245));
                     HPEN cPen = CreatePen(PS_SOLID, 1, RGB(220, 220, 220));
                     oldPen = (HPEN)SelectObject(hdcSb, cPen);
+                    
                     SelectObject(hdcSb, g_HoveredCard == 1 ? hovBrush : normBrush);
-                    RoundRect(hdcSb, 14, 66, 14 + cW, 66 + 88, 8, 8);
+                    RoundRect(hdcSb, 14, 66, 14 + cW, 66 + 60, 8, 8);
                     SelectObject(hdcSb, g_HoveredCard == 2 ? hovBrush : normBrush);
-                    RoundRect(hdcSb, 14 + cW + 14, 66, 14 + cW + 14 + cW, 66 + 88, 8, 8);
+                    RoundRect(hdcSb, 14, 66 + 74, 14 + cW, 66 + 74 + 60, 8, 8);
+                    SelectObject(hdcSb, g_HoveredCard == 3 ? hovBrush : normBrush);
+                    RoundRect(hdcSb, 14, 66 + 74 + 74, 14 + cW, 66 + 74 + 74 + 60, 8, 8);
+
                     SelectObject(hdcSb, oldPen); DeleteObject(cPen);
 
                     HFONT cFont = CreateFontA(14, 0, 0, 0, FW_BOLD, 0, 0, 0, ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, "Arial");
                     oldFont = (HFONT)SelectObject(hdcSb, cFont);
+                    
                     SetTextColor(hdcSb, RGB(220, 50, 50));
-                    RECT cr1 = { 14, 66, 14 + cW, 66 + 88 };
-                    DrawTextA(hdcSb, "Disconnect", -1, &cr1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    RECT cr1 = { 14, 66, 14 + cW, 66 + 60 };
+                    DrawTextA(hdcSb, "Disconnect Session", -1, &cr1, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                    
                     SetTextColor(hdcSb, RGB(50, 100, 220));
-                    RECT cr2 = { 14 + cW + 14, 66, 14 + cW + 14 + cW, 66 + 88 };
-                    const char* fsTxt = g_IsFullscreen ? "Exit Full-screen" : "Full-screen";
+                    RECT cr2 = { 14, 66 + 74, 14 + cW, 66 + 74 + 60 };
+                    const char* fsTxt = g_IsFullscreen ? "Exit Full-screen (F11)" : "Enter Full-screen (F11)";
                     DrawTextA(hdcSb, fsTxt, -1, &cr2, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+                    SetTextColor(hdcSb, RGB(34, 158, 34));
+                    RECT cr3 = { 14, 66 + 74 + 74, 14 + cW, 66 + 74 + 74 + 60 };
+                    DrawTextA(hdcSb, "Search with Google Lens", -1, &cr3, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
                     SelectObject(hdcSb, oldFont); DeleteObject(cFont);
                     DeleteObject(normBrush); DeleteObject(hovBrush);
                 }
@@ -269,6 +302,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 POINT pt = {x, y};
                 if (PtInRect(&g_Card1Rect, pt)) hover = 1;
                 else if (PtInRect(&g_Card2Rect, pt)) hover = 2;
+                else if (PtInRect(&g_Card3Rect, pt)) hover = 3;
                 if (hover != g_HoveredCard) {
                     g_HoveredCard = hover;
                     InvalidateRect(hWnd, NULL, FALSE);
@@ -349,6 +383,45 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         SetTimer(hWnd, 1, 10, NULL);
                         return 0;
                     }
+                    if (PtInRect(&g_Card3Rect, pt)) {
+                        // "Search with Google Lens"
+                        // 1. Capture current frame and put in clipboard as DIB
+                        std::lock_guard<std::mutex> lock(g_FrameMutex);
+                        if (!g_LatestFrame.empty() && g_FrameWidth > 0 && g_FrameHeight > 0) {
+                            BITMAPINFOHEADER bih = {0};
+                            bih.biSize = sizeof(BITMAPINFOHEADER);
+                            bih.biWidth = g_FrameWidth;
+                            bih.biHeight = g_FrameHeight; // DIBs are bottom-up by default, matches GDI
+                            bih.biPlanes = 1; bih.biBitCount = 32; bih.biCompression = BI_RGB;
+                            bih.biSizeImage = g_FrameWidth * g_FrameHeight * 4;
+
+                            HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, sizeof(BITMAPINFOHEADER) + bih.biSizeImage);
+                            if (hMem) {
+                                void* dst = GlobalLock(hMem);
+                                std::memcpy(dst, &bih, sizeof(bih));
+                                // Gupt stores pixels as top-down in memory, but DIB is bottom-up.
+                                // Quick fix: Flip rows while copying
+                                uint8_t* pixels = (uint8_t*)dst + sizeof(bih);
+                                size_t stride = g_FrameWidth * 4;
+                                for (uint32_t i = 0; i < g_FrameHeight; ++i) {
+                                    std::memcpy(pixels + (i * stride), 
+                                                g_LatestFrame.data() + ((g_FrameHeight - 1 - i) * stride), 
+                                                stride);
+                                }
+                                GlobalUnlock(hMem);
+                                if (OpenClipboard(hWnd)) {
+                                    EmptyClipboard();
+                                    SetClipboardData(CF_DIB, hMem);
+                                    CloseClipboard();
+                                } else { GlobalFree(hMem); }
+                            }
+                            // 2. Open Google Lens in browser
+                            ShellExecuteA(NULL, "open", "https://lens.google.com/upload", NULL, NULL, SW_SHOWNORMAL);
+                            MessageBoxA(hWnd, "Screenshot of host machine copied to clipboard!\n\nPlease press Ctrl+V to paste and search in the browser.", "Google Lens Search", MB_OK | MB_ICONINFORMATION);
+                        }
+                        g_SidebarOpen = false; SetTimer(hWnd, 1, 10, NULL);
+                        return 0;
+                    }
                     return 0; // Click inside sidebar but not on any control
                 } else if (g_SidebarOpen && x < g_SidebarX) {
                     g_SidebarOpen = false;
@@ -422,6 +495,63 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             if (LOWORD(wParam) != WA_INACTIVE && g_IsFullscreen)
                 SetWindowPos(hWnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
             return 0;
+        case WM_SETCURSOR: {
+            uint16_t ht = LOWORD(lParam);
+            if (ht == HTCLIENT) {
+                POINT pt; GetCursorPos(&pt); ScreenToClient(hWnd, &pt);
+                // If over sidebar or tab, show normal arrow
+                if (g_SidebarOpen || pt.x < g_SidebarX && PtInRect(&g_TabRect, pt)) {
+                    SetCursor(LoadCursor(NULL, IDC_ARROW));
+                    return TRUE;
+                }
+                // Over remote area: do NOT set cursor.
+                // This allows overlays (like Google Lens) to keep their selection cursor.
+                return TRUE; 
+            }
+            return DefWindowProc(hWnd, message, wParam, lParam);
+        }
+        case WM_CLIPBOARDUPDATE: {
+            if (g_IsConnected && OpenClipboard(hWnd)) {
+                // Handle Text
+                if (IsClipboardFormatAvailable(CF_UNICODETEXT)) {
+                    HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+                    if (hData) {
+                        wchar_t* wText = (wchar_t*)GlobalLock(hData);
+                        if (wText) {
+                            int len = WideCharToMultiByte(CP_UTF8, 0, wText, -1, NULL, 0, NULL, NULL);
+                            if (len > 1) {
+                                std::string utf8(len - 1, '\0');
+                                WideCharToMultiByte(CP_UTF8, 0, wText, -1, &utf8[0], len, NULL, NULL);
+                                if (utf8 != g_LastFromHost && utf8 != g_LastSent) {
+                                    g_LastSent = utf8;
+                                    g_Client.SendRaw(shared::SerializeClipboardText(utf8));
+                                }
+                            }
+                            GlobalUnlock(hData);
+                        }
+                    }
+                }
+                // Handle Image (DIB)
+                static DWORD s_lastImageSeq = 0;
+                DWORD currentSeq = GetClipboardSequenceNumber();
+                if (currentSeq != s_lastImageSeq && IsClipboardFormatAvailable(CF_DIB)) {
+                    HANDLE hData = GetClipboardData(CF_DIB);
+                    if (hData) {
+                        size_t size = GlobalSize(hData);
+                        void* ptr = GlobalLock(hData);
+                        if (ptr) {
+                            std::vector<uint8_t> dib(size);
+                            std::memcpy(dib.data(), ptr, size);
+                            GlobalUnlock(hData);
+                            g_Client.SendRaw(shared::SerializeClipboardImage(dib));
+                            s_lastImageSeq = currentSeq;
+                        }
+                    }
+                }
+                CloseClipboard();
+            }
+            break;
+        }
         case WM_DESTROY: PostQuitMessage(0); break;
         default: return DefWindowProc(hWnd, message, wParam, lParam);
     }
@@ -443,15 +573,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     wc.lpfnWndProc = WndProc; 
     wc.hInstance = hInstance; 
     wc.lpszClassName = "GuptClientClass"; 
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hIcon = LoadIconA(hInstance, MAKEINTRESOURCEA(101));
+    wc.hCursor = NULL; // We handle cursor manually for Lens/Host compatibility
     RegisterClassA(&wc);
 
     g_ScreenW = GetSystemMetrics(SM_CXSCREEN); 
     g_ScreenH = GetSystemMetrics(SM_CYSCREEN);
     g_SidebarX = g_ScreenW; 
     
-    HWND hWnd = CreateWindowExA(WS_EX_TOOLWINDOW, "GuptClientClass", "", WS_POPUP | WS_VISIBLE, 0, 0, g_ScreenW, g_ScreenH, NULL, NULL, hInstance, NULL);
-    SetWindowPos(hWnd, HWND_TOP, 0, 0, g_ScreenW, g_ScreenH, SWP_SHOWWINDOW);
+    HWND hWnd = CreateWindowExA(WS_EX_APPWINDOW, "GuptClientClass", "Gupt Client Viewer", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, g_ScreenW, g_ScreenH, NULL, NULL, hInstance, NULL);
+    g_IsFullscreen = false; // Start in windowed mode by default for better UX
+    ShowWindow(hWnd, SW_MAXIMIZE); // Or SW_SHOW
     UpdateWindow(hWnd);
 
     g_Client.SetMessageCallback([hWnd](shared::MessageType type, const std::vector<uint8_t>& payload) {
@@ -498,6 +630,39 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                     pStream->Release();
                 }
             }
+        } else if (type == shared::MessageType::ClipboardText) {
+            // Host sent us clipboard text — set it on the client clipboard
+            if (!payload.empty()) {
+                std::string utf8(reinterpret_cast<const char*>(payload.data()), payload.size());
+                g_LastFromHost = utf8; // echo-guard
+                int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, NULL, 0);
+                if (wlen > 0) {
+                    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, (size_t)wlen * sizeof(wchar_t));
+                    if (hMem) {
+                        wchar_t* dst = (wchar_t*)GlobalLock(hMem);
+                        if (dst) {
+                            MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, dst, wlen);
+                            GlobalUnlock(hMem);
+                            if (OpenClipboard(NULL)) { EmptyClipboard(); SetClipboardData(CF_UNICODETEXT, hMem); CloseClipboard(); }
+                            else { GlobalFree(hMem); }
+                        } else { GlobalFree(hMem); }
+                    }
+                }
+            }
+        } else if (type == shared::MessageType::ClipboardImage) {
+            // Host sent us a "Copy Image" result (e.g. from Google Lens on host)
+            if (!payload.empty()) {
+                HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, payload.size());
+                if (hMem) {
+                    void* dst = GlobalLock(hMem);
+                    if (dst) {
+                        std::memcpy(dst, payload.data(), payload.size());
+                        GlobalUnlock(hMem);
+                        if (OpenClipboard(NULL)) { EmptyClipboard(); SetClipboardData(CF_DIB, hMem); CloseClipboard(); }
+                        else { GlobalFree(hMem); }
+                    } else { GlobalFree(hMem); }
+                }
+            }
         }
     });
 
@@ -508,11 +673,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         g_Client.SendRaw(shared::SerializeMessage(shared::MessageType::ConnectRequest, req));
     }
 
+    // Register for clipboard changes
+    AddClipboardFormatListener(hWnd);
+
     MSG msg; 
     while (GetMessage(&msg, NULL, 0, 0)) { 
         TranslateMessage(&msg); 
         DispatchMessage(&msg); 
     }
+    RemoveClipboardFormatListener(hWnd);
     g_Client.Disconnect(); 
     return static_cast<int>(msg.wParam);
 }

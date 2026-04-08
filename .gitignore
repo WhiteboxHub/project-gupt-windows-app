@@ -43,3 +43,10 @@
 .vs/
 build/
 SignalingServer/node_modules/
+
+# Build Logs and Errors
+build_error.txt
+build_error_utf8.txt
+build_errors.txt
+build_output.txt
+gupt_errors.txt

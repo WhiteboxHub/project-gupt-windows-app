@@ -31,6 +31,7 @@ add_executable(Gupt WIN32
     Core/Input/InputInjector.cpp
     Core/Network/TcpNetwork.h
     Core/Network/TcpNetwork.cpp
+    resources.rc
 )
 target_include_directories(Gupt PRIVATE ${CORE_INCLUDES})
 target_link_libraries(Gupt PRIVATE ${WINDOWS_LIBS})
@@ -50,6 +51,7 @@ add_executable(HostAgent
     Core/Input/InputInjector.cpp
     Core/Network/TcpNetwork.h
     Core/Network/TcpNetwork.cpp
+    resources.rc
 )
 target_include_directories(HostAgent PRIVATE ${CORE_INCLUDES})
 target_link_libraries(HostAgent PRIVATE ${WINDOWS_LIBS})
@@ -61,6 +63,7 @@ add_executable(ClientViewer WIN32
     Shared/Protocol.h
     Core/Network/TcpNetwork.h
     Core/Network/TcpNetwork.cpp
+    resources.rc
 )
 target_include_directories(ClientViewer PRIVATE ${CORE_INCLUDES})
 target_link_libraries(ClientViewer PRIVATE ${WINDOWS_LIBS})

@@ -12,6 +12,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <iphlpapi.h>
 #include <commctrl.h>
 #include <string>
 #include <thread>
@@ -28,6 +29,48 @@
 #include "../Core/Capture/ScreenCapturer.h"
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "iphlpapi.lib")
+
+// --- Portable Session ID Logic (Zero-Server Architecture) ---
+static std::string GetLocalIP() {
+    char name[256];
+    if (gethostname(name, sizeof(name)) == 0) {
+        struct addrinfo hints = {}, *info = nullptr;
+        hints.ai_family = AF_INET;
+        if (getaddrinfo(name, nullptr, &hints, &info) == 0) {
+            for (auto p = info; p != nullptr; p = p->ai_next) {
+                struct sockaddr_in* addr = (struct sockaddr_in*)p->ai_addr;
+                std::string ip = inet_ntoa(addr->sin_addr);
+                // Prefer 192.x, 10.x, 172.x (Local network)
+                if (ip.find("192.") == 0 || ip.find("10.") == 0 || ip.find("172.") == 0) {
+                    std::string res = ip;
+                    freeaddrinfo(info);
+                    return res;
+                }
+            }
+            freeaddrinfo(info);
+        }
+    }
+    return "127.0.0.1";
+}
+
+static std::string EncodeIP(const std::string& ip) {
+    unsigned int a, b, c, d;
+    if (sscanf(ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return "INVALID";
+    char buf[16];
+    // Encode as a "Premium" 8-char hex code
+    sprintf(buf, "%02X%02X%02X%02X", a, b, c, d);
+    return std::string(buf);
+}
+
+static std::string DecodeIP(const std::string& id) {
+    if (id.length() != 8) return id; // Pass-through if it's already an IP
+    unsigned int a, b, c, d;
+    if (sscanf(id.c_str(), "%02X%02X%02X%02X", &a, &b, &c, &d) != 4) return "";
+    char buf[16];
+    sprintf(buf, "%u.%u.%u.%u", a, b, c, d);
+    return std::string(buf);
+}
 
 using namespace gupt;
 
@@ -48,7 +91,7 @@ using namespace gupt;
 //  Global launcher state
 // ─────────────────────────────────────────────────────────────────────────────
 static bool   g_LaunchAsHost = true;
-static char   g_HostIp[64]   = "192.168.0.100";
+static char   g_HostIp[128]  = ""; // Used for Session ID input now
 static bool   g_Launched     = false;
 static HFONT  g_FontTitle     = NULL;
 static HFONT  g_FontSub       = NULL;
@@ -96,6 +139,36 @@ static HWND g_hBtnLaunch = NULL;
 static HWND g_hBtnCancel = NULL;
 static bool g_BtnLaunchHover = false;
 static bool g_BtnCancelHover = false;
+
+// Functional Vector Logo Rendering (recreates the minimalist cube)
+static void DrawBrandingLogo(HDC hdc, int x, int y, int size, COLORREF color) {
+    HPEN hPen = CreatePen(PS_SOLID, 2, color);
+    HPEN hOld = (HPEN)SelectObject(hdc, hPen);
+    int w = size;
+    int h = (int)(size * 0.58f); // Isometric ratio
+
+    // Points for the cube outline
+    POINT p[7];
+    p[0] = { x + w / 2, y };          // Top center
+    p[1] = { x + w, y + h / 2 };      // Right center
+    p[2] = { x + w, y + h + h / 2 };  // Right bottom
+    p[3] = { x + w / 2, y + h * 2 };  // Bottom center
+    p[4] = { x, y + h + h / 2 };      // Left bottom
+    p[5] = { x, y + h / 2 };          // Left center
+    p[6] = { x + w / 2, y + h };      // Inner joint
+
+    // Draw the 3 faces
+    MoveToEx(hdc, p[0].x, p[0].y, NULL); LineTo(hdc, p[1].x, p[1].y);
+    LineTo(hdc, p[6].x, p[6].y); LineTo(hdc, p[5].x, p[5].y); LineTo(hdc, p[0].x, p[0].y); // Top/Left face
+
+    MoveToEx(hdc, p[1].x, p[1].y, NULL); LineTo(hdc, p[2].x, p[2].y);
+    LineTo(hdc, p[3].x, p[3].y); LineTo(hdc, p[6].x, p[6].y); // Right face
+
+    MoveToEx(hdc, p[5].x, p[5].y, NULL); LineTo(hdc, p[4].x, p[4].y);
+    LineTo(hdc, p[3].x, p[3].y); // Bottom left edge
+
+    SelectObject(hdc, hOld); DeleteObject(hPen);
+}
 
 // Subclass proc for Launch button (owner-draw)
 static WNDPROC g_OldBtnProc = NULL;
@@ -145,8 +218,8 @@ LRESULT CALLBACK LauncherWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             40, 158, 340, 28, hWnd, (HMENU)ID_RADIO_CLIENT, NULL, NULL);
         SendMessage(g_hRadioClient, WM_SETFONT, (WPARAM)g_FontBody, TRUE);
 
-        // IP label
-        g_hLabelIp = CreateWindowA("STATIC", "Host IP Address:",
+        // Session ID label
+        g_hLabelIp = CreateWindowA("STATIC", "Join Session ID:",
             WS_CHILD | SS_LEFT,
             40, 205, 340, 20, hWnd, (HMENU)ID_LABEL_IP, NULL, NULL);
         SendMessage(g_hLabelIp, WM_SETFONT, (WPARAM)g_FontBody, TRUE);
@@ -233,10 +306,13 @@ LRESULT CALLBACK LauncherWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
         }
 
         // ── Logo / Title ───────────────────────────────────────────────────
+        int titleX = 85;
+        DrawBrandingLogo(hdc, 40, 20, 32, RGB(255, 255, 255));
+
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, RGB(255, 255, 255));
         SelectObject(hdc, g_FontTitle);
-        RECT titleR = { 40, 18, rc.right - 20, 60 };
+        RECT titleR = { titleX, 18, rc.right - 20, 60 };
         DrawTextA(hdc, "Gupt Remote Desktop", -1, &titleR, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         // ── Subtitle ───────────────────────────────────────────────────────
@@ -330,7 +406,7 @@ LRESULT CALLBACK LauncherWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPar
             if (!g_LaunchAsHost) {
                 GetWindowTextA(g_hEditIp, g_HostIp, sizeof(g_HostIp));
                 if (strlen(g_HostIp) == 0) {
-                    MessageBoxA(hWnd, "Please enter the Host IP address.", "Gupt", MB_ICONWARNING | MB_OK);
+                    MessageBoxA(hWnd, "Please enter the Session ID.", "Gupt", MB_ICONWARNING | MB_OK);
                     return 0;
                 }
             }
@@ -361,6 +437,7 @@ static bool ShowLauncherDialog(HINSTANCE hInstance) {
     wc.lpfnWndProc   = LauncherWndProc;
     wc.hInstance     = hInstance;
     wc.lpszClassName = "GuptLauncherClass";
+    wc.hIcon         = LoadIconA(hInstance, MAKEINTRESOURCEA(101));
     wc.hbrBackground = CreateSolidBrush(CLR_BG);
     wc.hCursor       = LoadCursor(NULL, IDC_ARROW);
     wc.style         = CS_HREDRAW | CS_VREDRAW;
@@ -461,6 +538,13 @@ static std::string GetHostClipboardText() {
 static void RunHostMode() {
     SetProcessDPIAware();
 
+    // Self-generate Session ID based on local networking
+    std::string localIp = GetLocalIP();
+    std::string sessionId = EncodeIP(localIp);
+
+    std::string msg = "Gupt Host is active!\n\nYour Session ID is: " + sessionId + "\nLocal IP: " + localIp + "\n\nShare this ID with the client. The listener is now running on port 8080.";
+    MessageBoxA(NULL, msg.c_str(), "Gupt Host Startup", MB_ICONINFORMATION | MB_OK);
+
     gupt::core::network::TcpServer server(8080);
     gupt::core::input::InputInjector injector;
     gupt::core::capture::ScreenCapturer capturer;
@@ -491,7 +575,7 @@ static void RunHostMode() {
             } else if (type == shared::MessageType::KeyboardEvent) {
                 auto ev = reinterpret_cast<const shared::KeyboardEvent*>(payload.data());
                 injector.IngestKeyboardEvent(*ev);
-            } else if (type == shared::MessageType::ClipboardData) {
+            } else if (type == shared::MessageType::ClipboardText) {
                 // Client sent clipboard text → set on host clipboard
                 if (!payload.empty()) {
                     std::string utf8(reinterpret_cast<const char*>(payload.data()), payload.size());
@@ -512,6 +596,20 @@ static void RunHostMode() {
                                 } else { GlobalFree(hMem); }
                             } else { GlobalFree(hMem); }
                         }
+                    }
+                }
+            } else if (type == shared::MessageType::ClipboardImage) {
+                // Client sent clipboard image
+                if (!payload.empty()) {
+                    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, payload.size());
+                    if (hMem) {
+                        void* dst = GlobalLock(hMem);
+                        if (dst) {
+                            std::memcpy(dst, payload.data(), payload.size());
+                            GlobalUnlock(hMem);
+                            if (OpenClipboard(NULL)) { EmptyClipboard(); SetClipboardData(CF_DIB, hMem); CloseClipboard(); }
+                            else { GlobalFree(hMem); }
+                        } else { GlobalFree(hMem); }
                     }
                 }
             } else if (type == shared::MessageType::Disconnect) {
@@ -542,7 +640,7 @@ static void RunHostMode() {
                 }
 
                 lastSent = current;
-                server.SendRaw(shared::SerializeClipboard(current));
+                server.SendRaw(shared::SerializeClipboardText(current));
             }
         });
         clipWatcher.detach();
@@ -594,9 +692,32 @@ static HDC     g_BackDC  = NULL;
 static HBITMAP g_BackBmp = NULL;
 static int     g_BackW = 0, g_BackH = 0;
 
+static std::string g_clientLastSent;
+
 LRESULT CALLBACK ClientWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_TIMER:
+        if (wParam == 2) {
+            KillTimer(hWnd, 2);
+            // Standalone Direct Decoding
+            std::string actualIp = DecodeIP(std::string(g_HostIp));
+
+            if (actualIp.empty()) {
+                MessageBoxA(hWnd, "Invalid Session ID format.", "Connection Error", MB_ICONERROR | MB_OK);
+                PostQuitMessage(0);
+                return 0;
+            }
+
+            if (!g_Client.Connect(actualIp, 8080)) {
+                MessageBoxA(hWnd, "Discovered Host IP but failed to establish a direct connection.", "Connection Error", MB_ICONERROR | MB_OK);
+                PostQuitMessage(0);
+            } else {
+                g_IsConnected = true;
+                shared::ConnectRequest req = {};
+                g_Client.SendRaw(shared::SerializeMessage(shared::MessageType::ConnectRequest, req));
+            }
+            return 0;
+        }
         if (wParam == 1) {
             int targetX = g_SidebarOpen ? g_ScreenW - 260 : g_ScreenW;
             if (g_SidebarX != targetX) {
@@ -770,7 +891,7 @@ LRESULT CALLBACK ClientWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
                 if(PtInRect(&g_Card1Rect,pt)){g_Client.Disconnect();PostQuitMessage(0);return 0;}
                 if(PtInRect(&g_Card2Rect,pt)){
                     g_IsFullscreen=!g_IsFullscreen;
-                    if(g_IsFullscreen){GetWindowRect(hWnd,&g_SavedRect);SetWindowLongPtrA(hWnd,GWL_STYLE,WS_POPUP|WS_VISIBLE);SetWindowLongPtrA(hWnd,GWL_EXSTYLE,WS_EX_TOOLWINDOW);SetWindowPos(hWnd,HWND_TOP,0,0,GetSystemMetrics(SM_CXSCREEN),GetSystemMetrics(SM_CYSCREEN),SWP_SHOWWINDOW|SWP_FRAMECHANGED);}
+                                if(g_IsFullscreen){GetWindowRect(hWnd,&g_SavedRect);SetWindowLongPtrA(hWnd,GWL_STYLE,WS_POPUP|WS_VISIBLE);SetWindowLongPtrA(hWnd,GWL_EXSTYLE,WS_EX_TOOLWINDOW);SetWindowPos(hWnd,HWND_TOP,0,0,GetSystemMetrics(SM_CXSCREEN),GetSystemMetrics(SM_CYSCREEN),SWP_SHOWWINDOW|SWP_FRAMECHANGED);}
                     else{SetWindowLongPtrA(hWnd,GWL_STYLE,WS_OVERLAPPEDWINDOW|WS_VISIBLE);SetWindowLongPtrA(hWnd,GWL_EXSTYLE,WS_EX_APPWINDOW);SetWindowPos(hWnd,HWND_NOTOPMOST,g_SavedRect.left,g_SavedRect.top,g_SavedRect.right-g_SavedRect.left,g_SavedRect.bottom-g_SavedRect.top,SWP_SHOWWINDOW|SWP_FRAMECHANGED);}
                     g_SidebarOpen=false; SetTimer(hWnd,1,10,NULL); return 0;
                 }
@@ -793,24 +914,40 @@ LRESULT CALLBACK ClientWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
         // Clipboard changed on this client machine — grab the text and send it to the host
         // but SKIP if this change was triggered by us setting clipboard data received FROM the host
         if (g_IsConnected && OpenClipboard(hWnd)) {
-            HANDLE hData = GetClipboardData(CF_UNICODETEXT);
-            if (hData) {
-                wchar_t* wText = (wchar_t*)GlobalLock(hData);
-                if (wText) {
-                    int len = WideCharToMultiByte(CP_UTF8, 0, wText, -1, NULL, 0, NULL, NULL);
-                    if (len > 1) {
-                        std::string utf8(len - 1, '\0');
-                        WideCharToMultiByte(CP_UTF8, 0, wText, -1, &utf8[0], len, NULL, NULL);
-                        // Echo guards:
-                        // s_lastSent     — don't send same text twice
-                        // g_clientLastFromHost — don't send back what we just received from host
-                        static std::string s_lastSent;
-                        if (utf8 != s_lastSent && utf8 != g_clientLastFromHost) {
-                            s_lastSent = utf8;
-                            g_Client.SendRaw(shared::SerializeClipboard(utf8));
+            // Handle Text
+            if (IsClipboardFormatAvailable(CF_UNICODETEXT)) {
+                HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+                if (hData) {
+                    wchar_t* wText = (wchar_t*)GlobalLock(hData);
+                    if (wText) {
+                        int len = WideCharToMultiByte(CP_UTF8, 0, wText, -1, NULL, 0, NULL, NULL);
+                        if (len > 1) {
+                            std::string utf8(len - 1, '\0');
+                            WideCharToMultiByte(CP_UTF8, 0, wText, -1, &utf8[0], len, NULL, NULL);
+                            if (utf8 != g_clientLastFromHost && utf8 != g_clientLastSent) {
+                                g_clientLastSent = utf8;
+                                g_Client.SendRaw(shared::SerializeClipboardText(utf8));
+                            }
                         }
+                        GlobalUnlock(hData);
                     }
-                    GlobalUnlock(hData);
+                }
+            }
+            // Handle Image (DIB)
+            static DWORD s_lastImageSeq = 0;
+            DWORD currentSeq = GetClipboardSequenceNumber();
+            if (currentSeq != s_lastImageSeq && IsClipboardFormatAvailable(CF_DIB)) {
+                HANDLE hData = GetClipboardData(CF_DIB);
+                if (hData) {
+                    size_t size = GlobalSize(hData);
+                    void* ptr = GlobalLock(hData);
+                    if (ptr) {
+                        std::vector<uint8_t> dib(size);
+                        std::memcpy(dib.data(), ptr, size);
+                        GlobalUnlock(hData);
+                        g_Client.SendRaw(shared::SerializeClipboardImage(dib));
+                        s_lastImageSeq = currentSeq;
+                    }
                 }
             }
             CloseClipboard();
@@ -846,6 +983,17 @@ LRESULT CALLBACK ClientWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lP
         if(LOWORD(wParam)!=WA_INACTIVE&&g_IsFullscreen)
             SetWindowPos(hWnd,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE);
         return 0;
+    case WM_SETCURSOR: {
+        if (LOWORD(lParam) == HTCLIENT) {
+            POINT pt; GetCursorPos(&pt); ScreenToClient(hWnd, &pt);
+            if (g_SidebarOpen || pt.x < g_SidebarX && PtInRect(&g_TabRect, pt)) {
+                SetCursor(LoadCursor(NULL, IDC_ARROW));
+                return TRUE;
+            }
+            return TRUE; // No cursor for remote area
+        }
+        return DefWindowProcA(hWnd, message, wParam, lParam);
+    }
     case WM_DESTROY:
         PostQuitMessage(0); break;
     default:
@@ -862,15 +1010,16 @@ static void RunClientMode(HINSTANCE hInstance, const char* hostIp) {
     wc.lpfnWndProc = ClientWndProc;
     wc.hInstance   = hInstance;
     wc.lpszClassName = "GuptClientClass";
-    wc.hCursor     = LoadCursor(NULL, IDC_ARROW);
+    wc.hCursor     = NULL; // Manual cursor for Lens/Host compatibility
     RegisterClassA(&wc);
 
     g_ScreenW = GetSystemMetrics(SM_CXSCREEN);
     g_ScreenH = GetSystemMetrics(SM_CYSCREEN);
     g_SidebarX = g_ScreenW;
 
-    HWND hWnd = CreateWindowExA(WS_EX_TOOLWINDOW,"GuptClientClass","Gupt - Connecting...",WS_POPUP|WS_VISIBLE,0,0,g_ScreenW,g_ScreenH,NULL,NULL,hInstance,NULL);
-    SetWindowPos(hWnd,HWND_TOP,0,0,g_ScreenW,g_ScreenH,SWP_SHOWWINDOW);
+    HWND hWnd = CreateWindowExA(WS_EX_APPWINDOW, "GuptClientClass", "Gupt Client Viewer", WS_OVERLAPPEDWINDOW | WS_VISIBLE, 0, 0, g_ScreenW, g_ScreenH, NULL, NULL, hInstance, NULL);
+    g_IsFullscreen = false;
+    ShowWindow(hWnd, SW_MAXIMIZE);
     UpdateWindow(hWnd);
 
     // Register for clipboard change notifications — fires WM_CLIPBOARDUPDATE when user copies
@@ -919,10 +1068,8 @@ static void RunClientMode(HINSTANCE hInstance, const char* hostIp) {
                     pStream->Release();
                 }
             }
-        } else if (type == shared::MessageType::ClipboardData) {
+        } else if (type == shared::MessageType::ClipboardText) {
             // Host sent us clipboard text — set it on the client clipboard
-            // Set g_clientLastFromHost BEFORE calling SetClipboardData so the
-            // WM_CLIPBOARDUPDATE handler can skip re-sending this text back to host
             if (!payload.empty()) {
                 std::string utf8(reinterpret_cast<const char*>(payload.data()), payload.size());
                 g_clientLastFromHost = utf8; // echo-guard: must happen before SetClipboardData
@@ -941,6 +1088,20 @@ static void RunClientMode(HINSTANCE hInstance, const char* hostIp) {
                             } else { GlobalFree(hMem); }
                         } else { GlobalFree(hMem); }
                     }
+                }
+            }
+        } else if (type == shared::MessageType::ClipboardImage) {
+            // Host sent us an image result
+            if (!payload.empty()) {
+                HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, payload.size());
+                if (hMem) {
+                    void* dst = GlobalLock(hMem);
+                    if (dst) {
+                        std::memcpy(dst, payload.data(), payload.size());
+                        GlobalUnlock(hMem);
+                        if (OpenClipboard(NULL)) { EmptyClipboard(); SetClipboardData(CF_DIB, hMem); CloseClipboard(); }
+                        else { GlobalFree(hMem); }
+                    } else { GlobalFree(hMem); }
                 }
             }
         }
@@ -974,7 +1135,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     if (g_LaunchAsHost) {
         RunHostMode();
     } else {
-        RunClientMode(hInstance, g_HostIp);
+        std::string inputId = std::string(g_HostIp);
+        std::string actualIp = DecodeIP(inputId);
+
+        if (actualIp.empty()) {
+            MessageBoxA(NULL, "Invalid Session ID format.", "Gupt Error", MB_ICONERROR | MB_OK);
+            return 1;
+        }
+
+        RunClientMode(hInstance, actualIp.c_str());
     }
 
     CoUninitialize();

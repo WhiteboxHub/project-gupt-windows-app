@@ -16,7 +16,9 @@ project-gupt-windows-app/
 │   ├── Input/        ← Win32 SendInput mouse/keyboard injector
 │   └── Network/      ← Raw TCP framing layer
 ├── Shared/           ← Protocol definitions (message types, serialization)
-└── SignalingServer/  ← Node.js WebSocket server (reserved for WebRTC)
+├── SignalingServer/  ← Node.js WebSocket server (reserved for WebRTC)
+├── logo.ico          ← Application icon
+└── resources.rc      ← Windows resource file for branding
 ```
 
 ### Components
@@ -81,7 +83,8 @@ A launcher dialog will appear:
 │  ● Host (Share my screen)                │
 │  ○ Client (View remote screen)           │
 │                                          │
-│  [Host IP Address input — Client only]   │
+│  Join Session ID:                        │
+│  [  8-character hex code — Client only ] │
 │                                          │
 │  [  Launch Gupt  ]     [  Cancel  ]      │
 └──────────────────────────────────────────┘
@@ -92,12 +95,8 @@ A launcher dialog will appear:
 1. Run `Gupt.exe`
 2. Select **"Host (Share my screen)"**
 3. Click **Launch Gupt**
-4. Find the machine's IP address:
-   ```powershell
-   ipconfig
-   # Look for: IPv4 Address . . . . : 192.168.x.x
-   ```
-5. Share that IP with the person who will connect.
+4. A popup will reveal your **Session ID** (e.g., `C0A8010F`) along with your local IP.
+5. Share this **Session ID** with the person who will connect.
 6. When a client connects, a consent dialog will appear — click **Yes** to allow the session.
 7. A **Windows Firewall prompt** may appear on first run — click **Allow Access**.
 
@@ -105,9 +104,9 @@ A launcher dialog will appear:
 
 1. Run `Gupt.exe`
 2. Select **"Client (View remote screen)"**
-3. Enter the **Host's IP address** in the input field (e.g. `192.168.1.15`)
+3. Enter the **Session ID** provided by the host in the input field.
 4. Click **Launch Gupt**
-5. Once the host accepts, their desktop streams into a fullscreen window.
+5. Once the host accepts, their desktop streams into a high-performance, aspect-correct window.
 
 #### Client Controls
 
@@ -126,8 +125,8 @@ A launcher dialog will appear:
 
 You can run both host and client on the same machine for testing:
 
-1. Run `Gupt.exe` → select **Host** → Launch
-2. Run a **second instance** of `Gupt.exe` → select **Client** → enter `127.0.0.1` → Launch
+1. Run `Gupt.exe` → select **Host** → Launch → Copy the Session ID produced.
+2. Run a **second instance** of `Gupt.exe` → select **Client** → enter the Session ID → Launch
 3. Accept the consent dialog on the Host.
 
 > ⚠️ On a single monitor this creates an "infinite mirror" effect. Drag the client window to the side to see your real desktop behind it. Mouse clicks inside the client feed will land on the real desktop.
