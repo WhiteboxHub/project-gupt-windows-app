@@ -25,6 +25,7 @@ public:
     void Stop();
     bool SendRaw(const std::vector<uint8_t>& data);
     void SetMessageCallback(MessageCallback cb) { m_Callback = cb; }
+    bool IsClientConnected() { return m_ClientSocket != INVALID_SOCKET; }
 
 private:
     void AcceptThread();

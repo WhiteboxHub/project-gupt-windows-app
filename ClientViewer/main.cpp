@@ -569,13 +569,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
-    WNDCLASSA wc = {}; 
+    WNDCLASSEXA wc = { sizeof(WNDCLASSEXA) }; 
     wc.lpfnWndProc = WndProc; 
     wc.hInstance = hInstance; 
     wc.lpszClassName = "GuptClientClass"; 
     wc.hIcon = LoadIconA(hInstance, MAKEINTRESOURCEA(101));
+    wc.hIconSm = (HICON)LoadImageA(hInstance, MAKEINTRESOURCEA(101), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
     wc.hCursor = NULL; // We handle cursor manually for Lens/Host compatibility
-    RegisterClassA(&wc);
+    RegisterClassExA(&wc);
 
     g_ScreenW = GetSystemMetrics(SM_CXSCREEN); 
     g_ScreenH = GetSystemMetrics(SM_CYSCREEN);
