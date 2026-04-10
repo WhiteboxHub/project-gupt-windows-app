@@ -368,7 +368,6 @@ LRESULT CALLBACK ClientWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER: {
         if(wp==4) { InvalidateRect(hWnd, 0, FALSE); } 
         if(wp==1){ int target=g_SidebarOpen?g_WinW-260:g_WinW; if(g_SidebarX!=target){ g_SidebarX+=(target>g_SidebarX?60:-60); if(abs(g_SidebarX-target)<60)g_SidebarX=target; InvalidateRect(hWnd,0,FALSE); } else KillTimer(hWnd,1); }
-        if(wp==3){ if(g_IsConnected){ std::vector<uint8_t> hb; hb.push_back(0); PushEv(hb); } }
         if(wp==2){ KillTimer(hWnd,2);
             std::thread([hWnd](){
                 CoInitializeEx(0, COINIT_MULTITHREADED);
@@ -436,9 +435,13 @@ LRESULT CALLBACK KbdHookProc(int code, WPARAM wp, LPARAM lp) { if(code == HC_ACT
 static void RunClientMode(HINSTANCE hInst) {
     WNDCLASSEXA wc={sizeof(WNDCLASSEXA)}; wc.lpfnWndProc=ClientWndProc; wc.hInstance=hInst; wc.hIcon=(HICON)LoadImageA(hInst,MAKEINTRESOURCEA(101),IMAGE_ICON,32,32,0); wc.lpszClassName="GuptC"; wc.hCursor=LoadCursor(NULL,IDC_ARROW); RegisterClassExA(&wc);
     HWND hWnd=CreateWindowExA(WS_EX_APPWINDOW,"GuptC","Gupt Remote Desktop",WS_OVERLAPPEDWINDOW|WS_VISIBLE,CW_USEDEFAULT,CW_USEDEFAULT,1280,720,NULL,NULL,hInst,NULL);
-    AddClipboardFormatListener(hWnd); SetTimer(hWnd,3,8000,0); SetTimer(hWnd,4,16,0);
+    AddClipboardFormatListener(hWnd); SetTimer(hWnd,4,16,0);
     g_hKbdHook = SetWindowsHookEx(WH_KEYBOARD_LL, KbdHookProc, hInst, 0);
     g_Client.SetMessageCallback([hWnd](gupt::shared::MessageType t,const std::vector<uint8_t>& p){ if(t==gupt::shared::MessageType::FrameData)ProcessFrame(p,hWnd); else if(t==gupt::shared::MessageType::ClipboardText){ std::string s((char*)p.data(),p.size()); g_clientLastFromHost=s; int wn=MultiByteToWideChar(CP_UTF8,0,s.c_str(),-1,0,0); if(wn>0){ HGLOBAL m=GlobalAlloc(GMEM_MOVEABLE,wn*sizeof(wchar_t)); wchar_t* d=(wchar_t*)GlobalLock(m); MultiByteToWideChar(CP_UTF8,0,s.c_str(),-1,d,wn); GlobalUnlock(m); if(OpenClipboard(NULL)){EmptyClipboard();SetClipboardData(CF_UNICODETEXT,m);CloseClipboard();} } } });
+    
+    // Independent Sovereign Heartbeat Thread
+    std::thread([](){ while(true){ if(g_IsConnected){ PushEv({0}); } Sleep(2000); } }).detach();
+
     SetTimer(hWnd,2,100,0); MSG m; while(GetMessage(&m,0,0,0)){TranslateMessage(&m);DispatchMessage(&m);}
 }
 
