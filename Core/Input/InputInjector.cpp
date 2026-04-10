@@ -8,8 +8,8 @@ InputInjector::InputInjector() {}
 InputInjector::~InputInjector() {}
 
 void InputInjector::Initialize() {
-    m_ScreenWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    m_ScreenHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    m_ScreenWidth = GetSystemMetrics(SM_CXSCREEN);
+    m_ScreenHeight = GetSystemMetrics(SM_CYSCREEN);
 }
 
 void InputInjector::IngestKeyboardEvent(const gupt::shared::KeyboardEvent& ev) {

@@ -21,6 +21,7 @@ public:
     bool Initialize();
     bool CaptureNextFrame(std::vector<uint8_t>& outPixels, uint32_t& outWidth, uint32_t& outHeight);
     bool CaptureNextFrameJpeg(std::vector<uint8_t>& outJpeg, uint32_t& outWidth, uint32_t& outHeight, int quality);
+    bool CaptureRegionJpeg(const std::vector<uint8_t>& rawPixels, uint32_t fullWidth, uint32_t fullHeight, uint32_t x, uint32_t y, uint32_t w, uint32_t h, std::vector<uint8_t>& outJpeg, int quality);
     void ReleaseFrame();
 
 private:

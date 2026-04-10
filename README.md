@@ -1,167 +1,105 @@
 # Gupt Remote Desktop (Windows App)
 
-Gupt Remote Desktop is a lightweight, self-contained remote desktop application for Windows. It uses native Win32 APIs (GDI, SendInput) for screen capture and input injection — **no third-party libraries, no runtimes**. The entire application ships as a single portable `.exe`.
+Gupt Remote Desktop is a professional-grade, high-fidelity, and industrial-stable remote desktop utility for Windows. Built for performance and resilience, it features an "Eternal Sovereign" architecture that ensures session persistence over both LAN and the Internet.
+
+The entire application is self-contained, high-performance, and portable — **no third-party libraries, no runtimes, no bloat**.
 
 ---
 
-## Architecture
+## 🚀 Key Features
+
+*   **Eternal Sovereign Architecture**: Implements a self-healing "Infinite Relink" loop. If an Internet connection drops, the client automatically restores the session without closing the window.
+*   **Studio 95 Clarity**: High-fidelity video streaming using 95% Quality JPEG encoding with forced **4:4:4 color subsampling** for razor-sharp text and zero color smearing.
+*   **Pixel-Perfect Scaling**: Uses **Halftone pixel-blending** in the viewer, ensuring that text remains crisp and readable even when the remote window is resized.
+*   **Bidirectional Clipboard Sync**: Seamlessly share text between the host and client machines in real-time.
+*   **Pro-Gamer Responsiveness**: Features a **250Hz (4ms) Hardware-Level Mouse Throttle** for smooth, low-latency control while reducing network congestion.
+*   **Industrial Stability**: Grid-locked 16x16 MCU-aligned padding and contiguous 24bpp pixel extraction eliminate "RGB lines" and vertical artifacts on all screen resolutions.
+
+---
+
+## 📂 Architecture
 
 ```
 project-gupt-windows-app/
-├── Launcher/         ← Unified GUI launcher (Host + Client in one .exe)
-├── HostAgent/        ← Legacy standalone host (dev/testing only)
-├── ClientViewer/     ← Legacy standalone client (dev/testing only)
+├── Launcher/         ← Elite Unified GUI (Eternal Re-relink Logic + UI)
 ├── Core/
-│   ├── Capture/      ← GDI-based JPEG screen capturer
-│   ├── Input/        ← Win32 SendInput mouse/keyboard injector
-│   └── Network/      ← Raw TCP framing layer
-├── Shared/           ← Protocol definitions (message types, serialization)
-└── SignalingServer/  ← Node.js WebSocket server (reserved for WebRTC)
+│   ├── Capture/      ← Studio 95 / 4:4:4 Screen Engine
+│   ├── Input/        ← High-Precision Input Injector
+│   └── Network/      ← Sovereign Network Layer (LAN & Relay)
+├── Shared/           ← Protocol & Session Definitions
+├── SignalingServer/  ← Node.js Global Relay (Internet Traversal)
+├── logo.ico          ← Application Branding
+└── resources.rc      ← Performance Manifests & Resources
 ```
 
-### Components
+### 📦 Distribution Components
 
 | Target | Description |
 |---|---|
-| **`Gupt.exe`** | ✅ **Recommended.** Single portable executable. Launches a GUI dialog to choose Host or Client mode. Statically linked — runs on any Windows PC with no dependencies. |
-| `HostAgent.exe` | Legacy dev binary. Runs host-only in a console window (no launcher UI). |
-| `ClientViewer.exe` | Legacy dev binary. Runs client-only; IP is hardcoded (for dev use). |
+| **`Gupt.exe`** | ✅ **Recommended.** Single portable executable. Statically linked — runs on any Windows PC (Win 10/11) with zero dependencies. |
+| `SignalingServer` | The global relay required for connecting machines across the Internet. |
 
 ---
 
-## Prerequisites
+## 🛠️ Prerequisites
 
-- **Windows 10/11** (Win32 APIs used: GDI, SendInput, WIC, DirectX)
+- **Windows 10/11** (Uses native GDI, SendInput, WIC, and WinHTTP APIs)
 - **CMake** 3.20 or newer
-- **MSVC** (Visual Studio 2019 or later with "Desktop development with C++" workload)
+- **MSVC** (Visual Studio 2022 recommended)
 
-> **No external libraries required.** The build uses only Windows SDK APIs.
+> **No external libraries required.** The project is 100% native Windows SDK.
 
 ---
 
-## How to Build
+## 🏗️ How to Build
 
-Run from the `project-gupt-windows-app/` directory:
+Run from the root directory:
 
 ```powershell
-# Configure (auto-detects installed Visual Studio generator)
+# 1. Configure
 cmake -S . -B build
 
-# Build the unified launcher (recommended)
+# 2. Build the high-performance binary
 cmake --build build --target Gupt --config Release
-
-# Or build everything (Gupt + legacy HostAgent + ClientViewer)
-cmake --build build --config Release
 ```
 
-Output binaries are written to:
-```
-build/Release/Gupt.exe          ← Main distributable (~240 KB, self-contained)
-build/Release/HostAgent.exe     ← Legacy host binary
-build/Release/ClientViewer.exe  ← Legacy client binary
-```
-
-> **Static linking** is enabled via `CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded"`.  
-> `Gupt.exe` does **not** require the Visual C++ Redistributable to be installed on the target machine.
+Output: `build/Release/Gupt.exe` (Self-contained, ~250 KB)
 
 ---
 
-## How to Run — Using Gupt.exe (Recommended)
+## 🎮 How to Run
 
-Just copy `Gupt.exe` to any Windows PC and double-click it.
+### Internet Mode (Over the Web)
+1.  **Host**: Launch `Gupt.exe`, select **Host**, and click Launch. Copy your **Session ID**.
+2.  **Client**: Launch `Gupt.exe`, select **Client**, enter the **Session ID**, and click Launch.
+3.  **Persistence**: The session will stay active indefinitely. If your ISP blips, Gupt will auto-restore the connection.
 
-A launcher dialog will appear:
+### LAN Mode (Extreme Latency)
+Gupt automatically detects if the machines are on the same network. If so, it bypasses the internet relay for **near-zero latency** performance.
 
-```
-┌──────────────────────────────────────────┐
-│  Gupt Remote Desktop                     │
-│  Secure, lightweight screen sharing      │
-│                                          │
-│  SELECT MODE                             │
-│  ● Host (Share my screen)                │
-│  ○ Client (View remote screen)           │
-│                                          │
-│  [Host IP Address input — Client only]   │
-│                                          │
-│  [  Launch Gupt  ]     [  Cancel  ]      │
-└──────────────────────────────────────────┘
-```
+---
 
-### Host Machine (the PC being shared)
-
-1. Run `Gupt.exe`
-2. Select **"Host (Share my screen)"**
-3. Click **Launch Gupt**
-4. Find the machine's IP address:
-   ```powershell
-   ipconfig
-   # Look for: IPv4 Address . . . . : 192.168.x.x
-   ```
-5. Share that IP with the person who will connect.
-6. When a client connects, a consent dialog will appear — click **Yes** to allow the session.
-7. A **Windows Firewall prompt** may appear on first run — click **Allow Access**.
-
-### Client Machine (the PC doing the viewing/controlling)
-
-1. Run `Gupt.exe`
-2. Select **"Client (View remote screen)"**
-3. Enter the **Host's IP address** in the input field (e.g. `192.168.1.15`)
-4. Click **Launch Gupt**
-5. Once the host accepts, their desktop streams into a fullscreen window.
-
-#### Client Controls
+## ⌨️ Client Controls
 
 | Key / Action | Function |
 |---|---|
-| Click the `<` tab on the right edge | Open/close sidebar |
-| **Disconnect** (sidebar card) | End session and close |
-| **Full-screen / Exit Full-screen** (sidebar card) | Toggle fullscreen |
-| `F11` | Toggle fullscreen |
-| Mouse move / click / scroll inside the frame | Injected on host machine |
-| Keyboard input | Injected on host machine |
+| `<` Tab (Right edge) | Open sidebar for Control Dashboard |
+| **Disconnect** | Cleanly terminate the session |
+| **Fullscreen** | Toggle pixel-perfect fullscreen (`F11`) |
+| **Clipboard Sync** | Toggle real-time clipboard sharing |
+| **Alt+Tab / Win Keys** | Passed to remote host in Fullscreen mode |
 
 ---
 
-## How to Test on a Single Computer (Localhost)
-
-You can run both host and client on the same machine for testing:
-
-1. Run `Gupt.exe` → select **Host** → Launch
-2. Run a **second instance** of `Gupt.exe` → select **Client** → enter `127.0.0.1` → Launch
-3. Accept the consent dialog on the Host.
-
-> ⚠️ On a single monitor this creates an "infinite mirror" effect. Drag the client window to the side to see your real desktop behind it. Mouse clicks inside the client feed will land on the real desktop.
+## 🛡️ Security
+*   **Explicit Consent**: The Host must manually approve every connection request via a secure popup.
+*   **Privacy-First**: No background data tracking. All screen data travels directly via your signaling server/relay.
+*   **Static Manifest**: Built using hardened Win32 primitives to prevent buffer overflows and memory leaks.
 
 ---
 
-## Distributing the Application
-
-To share the app with another machine:
-
-- Copy **only `Gupt.exe`** — nothing else is needed.
-- No installer, no runtime setup, no Visual C++ Redistributable.
-- Works on: Windows 10, Windows 11 (x64).
-
----
-
-## Security
-
-- The **Host always shows a consent dialog** before any remote session begins. A session cannot be silently started.
-- An active session indicator remains visible while a remote peer is connected.
-- All input is injected only after explicit user approval.
-
----
-
-## Legacy Build Targets (Dev Only)
-
-If you need to build the old split binaries separately:
-
-```powershell
-# Host only
-cmake --build build --target HostAgent --config Release
-
-# Client only
-cmake --build build --target ClientViewer --config Release
-```
-
-> The `ClientViewer` legacy binary has the host IP hardcoded inside `ClientViewer/main.cpp` (line ~504). Edit `g_Client.Connect(...)` before building if you need a specific IP.
+## ✨ Design Aesthetics
+The application features a modern, branded Win32 UI with:
+- Custom **Glassmorphism-inspired** Sidebar
+- **Smooth Animations** for UI transitions
+- **High-contrast, eye-friendly** dark mode palette

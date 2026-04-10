@@ -164,11 +164,39 @@ bool TcpClient::Connect(const std::string& host, uint16_t port) {
     serverAddr.sin_port = htons(port);
     inet_pton(AF_INET, host.c_str(), &serverAddr.sin_addr);
 
-    if (connect(m_Socket, (sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
+    // Set non-blocking mode for timed connect (2 second timeout)
+    u_long nonBlocking = 1;
+    ioctlsocket(m_Socket, FIONBIO, &nonBlocking);
+
+    connect(m_Socket, (sockaddr*)&serverAddr, sizeof(serverAddr));
+
+    // Wait up to 2 seconds for the connection to succeed
+    fd_set writeSet;
+    FD_ZERO(&writeSet);
+    FD_SET(m_Socket, &writeSet);
+    timeval tv = { 2, 0 }; // 2 seconds timeout
+    int sel = select(0, NULL, &writeSet, NULL, &tv);
+
+    if (sel <= 0 || !FD_ISSET(m_Socket, &writeSet)) {
+        // Timed out or error — close and return false
         closesocket(m_Socket);
         m_Socket = INVALID_SOCKET;
         return false;
     }
+
+    // Verify connection actually succeeded (check SO_ERROR)
+    int err = 0;
+    int errLen = sizeof(err);
+    getsockopt(m_Socket, SOL_SOCKET, SO_ERROR, (char*)&err, &errLen);
+    if (err != 0) {
+        closesocket(m_Socket);
+        m_Socket = INVALID_SOCKET;
+        return false;
+    }
+
+    // Restore blocking mode
+    u_long blocking = 0;
+    ioctlsocket(m_Socket, FIONBIO, &blocking);
 
     int flag = 1;
     setsockopt(m_Socket, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));

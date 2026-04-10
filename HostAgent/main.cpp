@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <thread>
 #include <atomic>
+#include <mutex>
 #include "../Shared/Protocol.h"
 #include "../Core/Network/TcpNetwork.h"
 #include "../Core/Input/InputInjector.h"
@@ -44,6 +45,11 @@ int main() {
     injector.Initialize();
     capturer.Initialize();
 
+    // Echo-guard: tracks text the host clipboard just received FROM the client.
+    // The clipboard watcher thread checks against this to avoid sending it back.
+    std::string lastReceivedFromClient;
+    std::mutex  clipMutex;
+
     server.SetMessageCallback([&](shared::MessageType type, const std::vector<uint8_t>& payload) {
         if (type == shared::MessageType::ConnectRequest) {
             auto req = reinterpret_cast<const shared::ConnectRequest*>(payload.data());
@@ -71,6 +77,36 @@ int main() {
             } else if (type == shared::MessageType::KeyboardEvent) {
                 auto ev = reinterpret_cast<const shared::KeyboardEvent*>(payload.data());
                 injector.IngestKeyboardEvent(*ev);
+            } else if (type == shared::MessageType::ClipboardText) {
+                if (!payload.empty()) {
+                    std::string utf8(reinterpret_cast<const char*>(payload.data()), payload.size());
+                    { std::lock_guard<std::mutex> lk(clipMutex); lastReceivedFromClient = utf8; }
+                    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, NULL, 0);
+                    if (wlen > 0) {
+                        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, (size_t)wlen * sizeof(wchar_t));
+                        if (hMem) {
+                            wchar_t* dst = (wchar_t*)GlobalLock(hMem);
+                            if (dst) { MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, dst, wlen); GlobalUnlock(hMem);
+                                if (OpenClipboard(NULL)) { EmptyClipboard(); SetClipboardData(CF_UNICODETEXT, hMem); CloseClipboard(); }
+                                else { GlobalFree(hMem); }
+                            } else { GlobalFree(hMem); }
+                        }
+                    }
+                }
+            } else if (type == shared::MessageType::ClipboardImage) {
+                 // Client sent a "Copy Image" from Google Lens result (DIB data)
+                if (!payload.empty()) {
+                    HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, payload.size());
+                    if (hMem) {
+                        void* dst = GlobalLock(hMem);
+                        if (dst) {
+                            std::memcpy(dst, payload.data(), payload.size());
+                            GlobalUnlock(hMem);
+                            if (OpenClipboard(NULL)) { EmptyClipboard(); SetClipboardData(CF_DIB, hMem); CloseClipboard(); }
+                            else { GlobalFree(hMem); }
+                        } else { GlobalFree(hMem); }
+                    }
+                }
             } else if (type == shared::MessageType::Disconnect) {
                 std::cout << "Client disconnected." << std::endl;
                 g_SessionActive = false;
@@ -82,6 +118,61 @@ int main() {
         std::cout << "Listening on port 8080..." << std::endl;
         
         CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+
+        // --- Host clipboard watcher thread ---
+        std::thread clipWatcher([&]() {
+            std::string lastSentText;
+            while (true) {
+                Sleep(500);
+                if (!g_SessionActive) { lastSentText.clear(); continue; }
+
+                if (!OpenClipboard(NULL)) continue;
+                
+                // Monitor Text
+                if (IsClipboardFormatAvailable(CF_UNICODETEXT)) {
+                    HANDLE hData = GetClipboardData(CF_UNICODETEXT);
+                    if (hData) {
+                        wchar_t* wText = (wchar_t*)GlobalLock(hData);
+                        if (wText) {
+                            int len = WideCharToMultiByte(CP_UTF8, 0, wText, -1, NULL, 0, NULL, NULL);
+                            if (len > 1) {
+                                std::string currentText(len - 1, '\0');
+                                WideCharToMultiByte(CP_UTF8, 0, wText, -1, &currentText[0], len, NULL, NULL);
+                                {
+                                    std::lock_guard<std::mutex> lk(clipMutex);
+                                    if (currentText != lastSentText && currentText != lastReceivedFromClient) {
+                                        lastSentText = currentText;
+                                        server.SendRaw(shared::SerializeClipboardText(currentText));
+                                    }
+                                }
+                            }
+                            GlobalUnlock(hData);
+                        }
+                    }
+                }
+                
+                // Monitor Image (DIB format)
+                static DWORD s_lastImageSequence = 0;
+                DWORD currentSequence = GetClipboardSequenceNumber();
+                if (currentSequence != s_lastImageSequence && IsClipboardFormatAvailable(CF_DIB)) {
+                    HANDLE hData = GetClipboardData(CF_DIB);
+                    if (hData) {
+                        size_t size = GlobalSize(hData);
+                        void* ptr = GlobalLock(hData);
+                        if (ptr) {
+                            std::vector<uint8_t> dib(size);
+                            std::memcpy(dib.data(), ptr, size);
+                            GlobalUnlock(hData);
+                            server.SendRaw(shared::SerializeClipboardImage(dib));
+                            s_lastImageSequence = currentSequence;
+                        }
+                    }
+                }
+
+                CloseClipboard();
+            }
+        });
+        clipWatcher.detach();
 
         // MVP: Send frames loop
         ULONGLONG lastSendDuration = 0;

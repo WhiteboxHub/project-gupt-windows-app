@@ -14,7 +14,8 @@ enum class MessageType : uint8_t {
     KeyboardEvent = 5,
     Heartbeat = 6,
     Disconnect = 7,
-    ClipboardData = 8   // UTF-8 clipboard text sync (client ↔ host)
+    ClipboardText = 8,  // UTF-8 clipboard text sync
+    ClipboardImage = 9  // Binary clipboard Image (BMP/DIB) sync
 };
 
 #pragma pack(push, 1) // Ensure no padding for raw struct serialization
@@ -36,8 +37,12 @@ struct ConnectResponse {
 
 struct FrameDataHeader {
     uint32_t frameNumber;
-    uint32_t width;
-    uint32_t height;
+    uint32_t totalWidth;
+    uint32_t totalHeight;
+    uint32_t updateWidth;
+    uint32_t updateHeight;
+    uint32_t targetX;
+    uint32_t targetY;
     uint32_t bpp;
     bool isDelta;
     uint64_t timestampMs;
@@ -60,14 +65,26 @@ struct KeyboardEvent {
 #pragma pack(pop)
 
 // Clipboard: variable-length UTF-8 text — no fixed struct, raw bytes follow the header
-inline std::vector<uint8_t> SerializeClipboard(const std::string& utf8Text) {
+inline std::vector<uint8_t> SerializeClipboardText(const std::string& utf8Text) {
     uint32_t textLen = static_cast<uint32_t>(utf8Text.size());
     std::vector<uint8_t> buffer(sizeof(MessageHeader) + textLen);
     MessageHeader* hdr = reinterpret_cast<MessageHeader*>(buffer.data());
-    hdr->type = MessageType::ClipboardData;
+    hdr->type = MessageType::ClipboardText;
     hdr->payloadSize = textLen;
     if (textLen > 0)
         std::memcpy(buffer.data() + sizeof(MessageHeader), utf8Text.data(), textLen);
+    return buffer;
+}
+
+// Clipboard Image: variable-length DIB/pixels
+inline std::vector<uint8_t> SerializeClipboardImage(const std::vector<uint8_t>& dibData) {
+    uint32_t imgLen = static_cast<uint32_t>(dibData.size());
+    std::vector<uint8_t> buffer(sizeof(MessageHeader) + imgLen);
+    MessageHeader* hdr = reinterpret_cast<MessageHeader*>(buffer.data());
+    hdr->type = MessageType::ClipboardImage;
+    hdr->payloadSize = imgLen;
+    if (imgLen > 0)
+        std::memcpy(buffer.data() + sizeof(MessageHeader), dibData.data(), imgLen);
     return buffer;
 }
 
@@ -96,6 +113,24 @@ inline std::vector<uint8_t> SerializeFrame(const FrameDataHeader& frameInfo, con
     std::memcpy(buffer.data() + sizeof(MessageHeader) + sizeof(FrameDataHeader), frameData.data(), frameData.size());
     
     return buffer;
+}
+
+
+// Parse a raw byte buffer into a list of (MessageType, payload) pairs
+inline std::vector<std::pair<MessageType, std::vector<uint8_t>>>
+DeserializeMessages(const std::vector<uint8_t>& data) {
+    std::vector<std::pair<MessageType, std::vector<uint8_t>>> result;
+    size_t offset = 0;
+    while (offset + sizeof(MessageHeader) <= data.size()) {
+        const MessageHeader* hdr = reinterpret_cast<const MessageHeader*>(data.data() + offset);
+        size_t total = sizeof(MessageHeader) + hdr->payloadSize;
+        if (offset + total > data.size()) break;
+        std::vector<uint8_t> payload(data.begin() + offset + sizeof(MessageHeader),
+                                     data.begin() + offset + total);
+        result.emplace_back(hdr->type, std::move(payload));
+        offset += total;
+    }
+    return result;
 }
 
 } // namespace shared
