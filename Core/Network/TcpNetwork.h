@@ -47,6 +47,7 @@ public:
     void Disconnect();
     bool SendRaw(const std::vector<uint8_t>& data);
     void SetMessageCallback(MessageCallback cb) { m_Callback = cb; }
+    bool IsConnected() const { return m_IsConnected && m_Socket != INVALID_SOCKET; }
 
 private:
     void ReceiveThread();

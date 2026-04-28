@@ -19,9 +19,11 @@ public:
     ~ScreenCapturer();
 
     bool Initialize();
+    void Reset();
     bool CaptureNextFrame(std::vector<uint8_t>& outPixels, uint32_t& outWidth, uint32_t& outHeight);
+    bool GetLastDirtyBounds(uint32_t& x, uint32_t& y, uint32_t& w, uint32_t& h) const;
     bool CaptureNextFrameJpeg(std::vector<uint8_t>& outJpeg, uint32_t& outWidth, uint32_t& outHeight, int quality);
-    bool CaptureRegionJpeg(const std::vector<uint8_t>& rawPixels, uint32_t fullWidth, uint32_t fullHeight, uint32_t x, uint32_t y, uint32_t w, uint32_t h, std::vector<uint8_t>& outJpeg, int quality);
+    bool CaptureRegionJpeg(const std::vector<uint8_t>& rawPixels, uint32_t fullWidth, uint32_t fullHeight, uint32_t x, uint32_t y, uint32_t w, uint32_t h, std::vector<uint8_t>& outJpeg, int quality, bool force444 = true);
     void ReleaseFrame();
 
 private:
@@ -30,6 +32,8 @@ private:
     ComPtr<IDXGIOutputDuplication> m_DeskDupl;
     uint32_t m_Width = 0;
     uint32_t m_Height = 0;
+    RECT m_LastDirtyBounds = { 0, 0, 0, 0 };
+    bool m_HasLastDirtyBounds = false;
 };
 
 } // namespace capture
