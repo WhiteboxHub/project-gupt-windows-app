@@ -41,6 +41,8 @@ static bool g_IsConnected = false, g_UsingRelay = false, g_SidebarOpen = false, 
 static std::mutex g_FrameMutex, g_hostClipMtx, g_EvMtx, g_SendMtx, g_EncMtx;
 static std::vector<uint8_t> g_PendingFrame, g_RawQueue;
 static uint32_t g_RawW=0, g_RawH=0;
+static uint32_t g_DirtyX=0, g_DirtyY=0, g_DirtyW=0, g_DirtyH=0;
+static bool g_HasDirtyBounds=false;
 static std::vector<std::vector<uint8_t>> g_SendQueue;
 static std::vector<std::vector<uint8_t>> g_EvQueue;
 static std::condition_variable g_EvCv, g_SendCv, g_EncCv;
@@ -49,6 +51,17 @@ static std::condition_variable g_EvCv, g_SendCv, g_EncCv;
 static HFONT g_FontTitle, g_FontBody, g_FontBtn;
 static HWND g_hRadioHost, g_hRadioClient, g_hEditIp;
 static HHOOK g_hKbdHook = NULL;
+
+static void PowerKeepAwakeLoop() {
+    while(true) {
+        if(g_SessionActive || g_IsConnected) {
+            SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+        } else {
+            SetThreadExecutionState(ES_CONTINUOUS);
+        }
+        Sleep(30000);
+    }
+}
 
 class WsRelay {
 public:
@@ -106,42 +119,43 @@ static void PushOutbound(std::vector<uint8_t> f, bool isUrgent) {
 }
 
 static void HostEncoderLoop(gupt::core::capture::ScreenCapturer* capturer) {
-    std::vector<uint8_t> lastPixels;
     int frameCounter = 0;
     while(true) {
         std::vector<uint8_t> raw; uint32_t w, h;
+        uint32_t minX = 0, minY = 0, tw = 0, th = 0;
+        bool hasDirty = false;
         {
             std::unique_lock<std::mutex> lk(g_EncMtx);
             g_EncCv.wait(lk, []{ return !g_RawQueue.empty(); });
             raw = std::move(g_RawQueue); g_RawQueue.clear();
             w = g_RawW; h = g_RawH;
+            minX = g_DirtyX; minY = g_DirtyY; tw = g_DirtyW; th = g_DirtyH; hasDirty = g_HasDirtyBounds;
         }
         if(!raw.empty()) {
-            uint32_t minX=w, minY=h, maxX=0, maxY=0; bool changed=false;
-            frameCounter++; if(frameCounter > 120) { lastPixels.clear(); frameCounter = 0; }
-            if(!lastPixels.empty() && lastPixels.size()==raw.size()){
-                for(uint32_t y=0; y<h; y+=4){
-                    for(uint32_t x=0; x<w; x+=4){
-                        size_t idx=(y*w+x)*4;
-                        if(raw[idx]!=lastPixels[idx]||raw[idx+1]!=lastPixels[idx+1]||raw[idx+2]!=lastPixels[idx+2]){
-                            changed=true; minX=(x<minX)?x:minX; minY=(y<minY)?y:minY; maxX=(x+4>maxX)?(x+4):maxX; maxY=(y+4>maxY)?(y+4):maxY;
-                        }
-                    }
-                }
-            } else { changed=true; minX=0; minY=0; maxX=w; maxY=h; }
-            if(changed){
+            frameCounter++;
+            if(!hasDirty || frameCounter > 240) {
+                minX = 0; minY = 0; tw = w; th = h; frameCounter = 0;
+            }
+
+            if(tw > 0 && th > 0) {
+                uint32_t maxX = minX + tw;
+                uint32_t maxY = minY + th;
                 minX = (minX / 16) * 16; minY = (minY / 16) * 16;
                 maxX = ((maxX + 15) / 16) * 16; maxY = ((maxY + 15) / 16) * 16;
-                if(maxX > w) maxX = ((w + 15) / 16) * 16; 
-                if(maxY > h) maxY = ((h + 15) / 16) * 16;
-                uint32_t tw = maxX - minX; uint32_t th = maxY - minY;
+                if(maxX > w) maxX = w; 
+                if(maxY > h) maxY = h;
+                tw = maxX - minX; th = maxY - minY;
                 if(tw >= 16 && th >= 16) {
                     std::vector<uint8_t> jpg;
-                    if(capturer->CaptureRegionJpeg(raw, w, h, minX, minY, tw, th, jpg, 95)){
+                    uint64_t regionPixels = static_cast<uint64_t>(tw) * static_cast<uint64_t>(th);
+                    uint64_t screenPixels = static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
+                    bool videoLike = regionPixels > (screenPixels / 3);
+                    int quality = videoLike ? 72 : 88;
+                    bool force444 = !videoLike;
+                    if(capturer->CaptureRegionJpeg(raw, w, h, minX, minY, tw, th, jpg, quality, force444)){
                         PushOutbound(gupt::shared::SerializeFrame({0, w, h, tw, th, minX, minY, 32, (tw < w || th < h), 0}, jpg), false);
                     }
                 }
-                lastPixels = std::move(raw);
             }
         }
     }
@@ -247,7 +261,16 @@ std::string GetClipboardText() {
     CloseClipboard(); return res;
 }
 
+static std::vector<uint8_t> MakeConnectRequest() {
+    gupt::shared::ConnectRequest req = {};
+    strncpy(req.sessionId, g_CurrentSessionId.empty() ? "GUPT_SESSION" : g_CurrentSessionId.c_str(), sizeof(req.sessionId) - 1);
+    strncpy(req.authenticationToken, "GUPT_LOCAL_TOKEN", sizeof(req.authenticationToken) - 1);
+    return gupt::shared::SerializeMessage(gupt::shared::MessageType::ConnectRequest, req);
+}
+
 static void RunHostMode() {
+    std::thread(PowerKeepAwakeLoop).detach();
+
     core::input::InputInjector injector;
     std::string json = HttpGet("/register");
     size_t pos = json.find("sessionId\":\"");
@@ -277,8 +300,11 @@ static void RunHostMode() {
             auto msgs = shared::DeserializeMessages(d);
             for(auto& msg : msgs) {
                 auto t = msg.first; auto& p = msg.second;
-                if(t == shared::MessageType::ConnectRequest && !g_SessionActive) {
-                    if(MessageBoxA(NULL, "Remote client is requesting access via Internet. Allow?", "Gupt Security", MB_YESNO|MB_ICONQUESTION|MB_SETFOREGROUND)==IDYES) {
+                if(t == shared::MessageType::ConnectRequest) {
+                    if(g_SessionActive) {
+                        shared::ConnectResponse res={true, "OK"}; auto f = shared::SerializeMessage(shared::MessageType::ConnectResponse, res);
+                        g_Relay.Send(f.data(), f.size());
+                    } else if(MessageBoxA(NULL, "Remote client is requesting access via Internet. Allow?", "Gupt Security", MB_YESNO|MB_ICONQUESTION|MB_SETFOREGROUND)==IDYES) {
                         shared::ConnectResponse res={true, "OK"}; auto f = shared::SerializeMessage(shared::MessageType::ConnectResponse, res);
                         g_Relay.Send(f.data(), f.size()); g_SessionActive = true; g_UsingRelay = true; 
                     } else { shared::ConnectResponse res={false, "Denied"}; auto f = shared::SerializeMessage(shared::MessageType::ConnectResponse, res); g_Relay.Send(f.data(), f.size()); }
@@ -301,7 +327,15 @@ static void RunHostMode() {
     core::capture::ScreenCapturer capturer; capturer.Initialize();
 
     server.SetMessageCallback([&](shared::MessageType t, const std::vector<uint8_t>& p) {
-        if(t==shared::MessageType::ConnectRequest) { g_SessionActive=true; shared::ConnectResponse res={true,"OK"}; server.SendRaw(shared::SerializeMessage(shared::MessageType::ConnectResponse,res)); }
+        if(t==shared::MessageType::ConnectRequest) {
+            if(g_SessionActive) {
+                shared::ConnectResponse res={true,"OK"}; server.SendRaw(shared::SerializeMessage(shared::MessageType::ConnectResponse,res));
+            } else if(MessageBoxA(NULL, "Remote client is requesting access on LAN. Allow?", "Gupt Security", MB_YESNO|MB_ICONQUESTION|MB_SETFOREGROUND)==IDYES) {
+                g_SessionActive=true; shared::ConnectResponse res={true,"OK"}; server.SendRaw(shared::SerializeMessage(shared::MessageType::ConnectResponse,res));
+            } else {
+                shared::ConnectResponse res={false,"Denied"}; server.SendRaw(shared::SerializeMessage(shared::MessageType::ConnectResponse,res));
+            }
+        }
         else if(t==shared::MessageType::MouseEvent) { injector.IngestMouseEvent(*reinterpret_cast<const shared::MouseEvent*>(p.data())); }
         else if(t==shared::MessageType::KeyboardEvent) { injector.IngestKeyboardEvent(*reinterpret_cast<const shared::KeyboardEvent*>(p.data())); }
         else if(g_ClipboardSyncEnabled && t==shared::MessageType::ClipboardText){ std::string s((char*)p.data(),p.size()); {std::lock_guard<std::mutex> lk(g_hostClipMtx); g_lastFromClient=s;} int wn=MultiByteToWideChar(CP_UTF8,0,s.c_str(),-1,0,0); if(wn>0){ HGLOBAL m=GlobalAlloc(GMEM_MOVEABLE,wn*sizeof(wchar_t)); wchar_t* d=(wchar_t*)GlobalLock(m); MultiByteToWideChar(CP_UTF8,0,s.c_str(),-1,d,wn); GlobalUnlock(m); if(OpenClipboard(NULL)){EmptyClipboard();SetClipboardData(CF_UNICODETEXT,m);CloseClipboard();} } }
@@ -318,7 +352,9 @@ static void RunHostMode() {
             uint64_t loopStart = GetTickCount64();
             std::vector<uint8_t> raw; uint32_t w, h;
             if(capturer.CaptureNextFrame(raw, w, h)) {
-                { std::lock_guard<std::mutex> lk(g_EncMtx); g_RawQueue = std::move(raw); g_RawW = w; g_RawH = h; }
+                uint32_t dx=0, dy=0, dw=0, dh=0;
+                bool hasDirty = capturer.GetLastDirtyBounds(dx, dy, dw, dh);
+                { std::lock_guard<std::mutex> lk(g_EncMtx); g_RawQueue = std::move(raw); g_RawW = w; g_RawH = h; g_DirtyX = dx; g_DirtyY = dy; g_DirtyW = dw; g_DirtyH = dh; g_HasDirtyBounds = hasDirty; }
                 g_EncCv.notify_one();
             }
             uint64_t el = GetTickCount64() - loopStart;
@@ -380,11 +416,22 @@ LRESULT CALLBACK ClientWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
                     size_t pos = j.find("hostIp\":\"");
                     if(pos != std::string::npos){ actualIp = j.substr(pos + 9); size_t end = actualIp.find("\""); if(end != std::string::npos) actualIp = actualIp.substr(0, end); }
                 }
-                if(!actualIp.empty() && g_Client.Connect(actualIp, 8080)){ g_IsConnected = true; SetWindowTextA(hWnd, "Gupt - Connected (LAN)"); while(g_IsConnected){Sleep(100);} } 
-                else {
+                while(true) {
+                    if(!actualIp.empty() && g_Client.Connect(actualIp, 8080)){
+                        g_UsingRelay = false;
+                        SetWindowTextA(hWnd, "Gupt - Waiting for host approval (LAN)");
+                        auto req = MakeConnectRequest();
+                        g_Client.SendRaw(req);
+                        while(g_Client.IsConnected()){Sleep(250);}
+                        g_IsConnected = false;
+                        SetWindowTextA(hWnd, "Gupt - Reconnecting...");
+                        Sleep(1000);
+                        continue;
+                    }
+
                     if(g_Relay.Open(g_SignalingHost, g_SignalingPort, rp, g_SignalingPort==443)){
                         g_UsingRelay = true; 
-                        auto req = gupt::shared::SerializeMessage(gupt::shared::MessageType::ConnectRequest, std::vector<uint8_t>{});
+                        auto req = MakeConnectRequest();
                         g_Relay.Send(req.data(), (uint32_t)req.size());
                         bool verified = false; for(int i=0; i<100 && !verified; ++i){ auto d = g_Relay.Recv(); if(d.empty()){ Sleep(100); continue; } auto msgs = gupt::shared::DeserializeMessages(d); for(auto& m : msgs) if(m.first == gupt::shared::MessageType::ConnectResponse) verified = true; }
                         if(verified){
@@ -396,8 +443,9 @@ LRESULT CALLBACK ClientWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
                                 int lastVid = -1; for(int i=(int)msgs.size()-1; i>=0; --i) if(msgs[i].first == gupt::shared::MessageType::FrameData) { lastVid = i; break; }
                                 for(int i=0; i<(int)msgs.size(); ++i){ if(i == lastVid) { ProcessFrame(msgs[i].second, hWnd); PushEv({0xFF}); } else if(msgs[i].first == gupt::shared::MessageType::ClipboardText){ auto& p = msgs[i].second; std::string s((char*)p.data(),p.size()); g_clientLastFromHost=s; int wn=MultiByteToWideChar(CP_UTF8,0,s.c_str(),-1,0,0); if(wn>0){ HGLOBAL m=GlobalAlloc(GMEM_MOVEABLE,wn*sizeof(wchar_t)); wchar_t* d=(wchar_t*)GlobalLock(m); MultiByteToWideChar(CP_UTF8,0,s.c_str(),-1,d,wn); GlobalUnlock(m); if(OpenClipboard(NULL)){EmptyClipboard();SetClipboardData(CF_UNICODETEXT,m);CloseClipboard();} } } }
                             }
-                        } else { MessageBoxA(hWnd, "Handshake failed.", "Gupt", MB_OK); }
-                    } else { MessageBoxA(hWnd, "Connection failed.", "Gupt", MB_OK); }
+                            g_IsConnected = false;
+                        } else { SetWindowTextA(hWnd, "Gupt - Handshake failed, retrying..."); g_Relay.Close(); Sleep(2000); }
+                    } else { SetWindowTextA(hWnd, "Gupt - Connection failed, retrying..."); Sleep(2000); }
                 }
             }).detach();
         } break;
@@ -433,11 +481,21 @@ LRESULT CALLBACK ClientWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
 LRESULT CALLBACK KbdHookProc(int code, WPARAM wp, LPARAM lp) { if(code == HC_ACTION && g_IsFullscreen && g_IsConnected) { KBDLLHOOKSTRUCT* hs = (KBDLLHOOKSTRUCT*)lp; bool sysKey = (hs->vkCode == VK_TAB && (hs->flags & LLKHF_ALTDOWN)) || (hs->vkCode == VK_LWIN) || (hs->vkCode == VK_RWIN) || (hs->vkCode == VK_ESCAPE && (GetKeyState(VK_CONTROL)&0x8000)); if(sysKey || (GetKeyState(VK_LWIN)&0x8000) || (GetKeyState(VK_RWIN)&0x8000)) { gupt::shared::KeyboardEvent ke = {(uint16_t)hs->vkCode, (wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN)}; PushEv(gupt::shared::SerializeMessage(gupt::shared::MessageType::KeyboardEvent, ke)); return 1; } } return CallNextHookEx(g_hKbdHook, code, wp, lp); }
 
 static void RunClientMode(HINSTANCE hInst) {
+    std::thread(PowerKeepAwakeLoop).detach();
+
     WNDCLASSEXA wc={sizeof(WNDCLASSEXA)}; wc.lpfnWndProc=ClientWndProc; wc.hInstance=hInst; wc.hIcon=(HICON)LoadImageA(hInst,MAKEINTRESOURCEA(101),IMAGE_ICON,32,32,0); wc.lpszClassName="GuptC"; wc.hCursor=LoadCursor(NULL,IDC_ARROW); RegisterClassExA(&wc);
     HWND hWnd=CreateWindowExA(WS_EX_APPWINDOW,"GuptC","Gupt Remote Desktop",WS_OVERLAPPEDWINDOW|WS_VISIBLE,CW_USEDEFAULT,CW_USEDEFAULT,1280,720,NULL,NULL,hInst,NULL);
     AddClipboardFormatListener(hWnd); SetTimer(hWnd,4,16,0);
     g_hKbdHook = SetWindowsHookEx(WH_KEYBOARD_LL, KbdHookProc, hInst, 0);
-    g_Client.SetMessageCallback([hWnd](gupt::shared::MessageType t,const std::vector<uint8_t>& p){ if(t==gupt::shared::MessageType::FrameData)ProcessFrame(p,hWnd); else if(t==gupt::shared::MessageType::ClipboardText){ std::string s((char*)p.data(),p.size()); g_clientLastFromHost=s; int wn=MultiByteToWideChar(CP_UTF8,0,s.c_str(),-1,0,0); if(wn>0){ HGLOBAL m=GlobalAlloc(GMEM_MOVEABLE,wn*sizeof(wchar_t)); wchar_t* d=(wchar_t*)GlobalLock(m); MultiByteToWideChar(CP_UTF8,0,s.c_str(),-1,d,wn); GlobalUnlock(m); if(OpenClipboard(NULL)){EmptyClipboard();SetClipboardData(CF_UNICODETEXT,m);CloseClipboard();} } } });
+    g_Client.SetMessageCallback([hWnd](gupt::shared::MessageType t,const std::vector<uint8_t>& p){
+        if(t==gupt::shared::MessageType::ConnectResponse && p.size() >= sizeof(gupt::shared::ConnectResponse)){
+            auto res = reinterpret_cast<const gupt::shared::ConnectResponse*>(p.data());
+            g_IsConnected = res->accepted;
+            SetWindowTextA(hWnd, res->accepted ? "Gupt - Connected (LAN)" : "Gupt - Connection denied");
+        } else if(t==gupt::shared::MessageType::Disconnect) {
+            g_IsConnected = false;
+            SetWindowTextA(hWnd, "Gupt - Disconnected");
+        } else if(t==gupt::shared::MessageType::FrameData)ProcessFrame(p,hWnd); else if(t==gupt::shared::MessageType::ClipboardText){ std::string s((char*)p.data(),p.size()); g_clientLastFromHost=s; int wn=MultiByteToWideChar(CP_UTF8,0,s.c_str(),-1,0,0); if(wn>0){ HGLOBAL m=GlobalAlloc(GMEM_MOVEABLE,wn*sizeof(wchar_t)); wchar_t* d=(wchar_t*)GlobalLock(m); MultiByteToWideChar(CP_UTF8,0,s.c_str(),-1,d,wn); GlobalUnlock(m); if(OpenClipboard(NULL)){EmptyClipboard();SetClipboardData(CF_UNICODETEXT,m);CloseClipboard();} } } });
     
     // Independent Sovereign Heartbeat Thread
     std::thread([](){ while(true){ if(g_IsConnected){ PushEv({0}); } Sleep(2000); } }).detach();
