@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gupt Remote Desktop</title>
+  </head>
+  <body>
+    <main id="app">
+      <section id="launcher" class="panel">
+        <header>
+          <h1>Gupt</h1>
+          <p>Cross-platform remote desktop preview</p>
+        </header>
+        <div class="mode-row">
+          <button id="clientMode" class="selected">Client</button>
+          <button id="hostMode">Host</button>
+        </div>
+        <label>
+          Session ID
+          <input id="sessionInput" autocomplete="off" placeholder="ABC12345" />
+        </label>
+        <div class="actions">
+          <button id="connectBtn">Connect</button>
+          <button id="startHostBtn" hidden>Start Host</button>
+        </div>
+        <p id="status">Ready</p>
+      </section>
+      <section id="viewer" hidden>
+        <canvas id="screen"></canvas>
+        <aside id="toolbar">
+          <button id="disconnectBtn">Disconnect</button>
+          <span id="streamStatus">Disconnected</span>
+        </aside>
+      </section>
+    </main>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

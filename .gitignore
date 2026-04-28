@@ -42,6 +42,11 @@
 # Project Config
 .vs/
 build/
+CrossPlatform/target/
+CrossPlatform/apps/gupt-desktop/dist/
+CrossPlatform/apps/gupt-desktop/node_modules/
+CrossPlatform/apps/gupt-desktop/src-tauri/gen/
+CrossPlatform/apps/gupt-desktop/src-tauri/target/
 SignalingServer/node_modules/
 
 # OS specific files
