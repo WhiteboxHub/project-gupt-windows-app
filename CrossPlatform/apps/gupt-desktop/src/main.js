@@ -15,13 +15,55 @@ import {
 const SIGNALING_HOST = "gupt-signal-server-560359652969.us-central1.run.app";
 const RELAY_BASE = `wss://${SIGNALING_HOST}/relay`;
 const HTTP_BASE = `https://${SIGNALING_HOST}`;
+const FRAME_INTERVAL_MS = 16; // 60 FPS for low latency
+const JPEG_QUALITY = 0.9;
+const MAX_RECONNECT_ATTEMPTS = 30;
+const MAX_RELAY_BUFFER_BYTES = 2_000_000;
+
+const statusMsg = document.getElementById("status");
+const streamStatus = document.getElementById("streamStatus");
+const canvas = document.getElementById("screen");
+const ctx = canvas.getContext("2d", { alpha: false });
+
+const fullScreenBtn = document.getElementById("fullScreenBtn");
+const exitFullScreenBtn = document.getElementById("exitFullScreenBtn");
+
+if (fullScreenBtn && exitFullScreenBtn) {
+  fullScreenBtn.addEventListener("click", () => {
+    document.documentElement.requestFullscreen().catch((err) => {
+      console.warn("Fullscreen error:", err);
+    });
+  });
+
+  exitFullScreenBtn.addEventListener("click", () => {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(err => console.warn(err));
+    }
+  });
+
+  document.addEventListener("fullscreenchange", () => {
+    if (document.fullscreenElement) {
+      fullScreenBtn.hidden = true;
+      exitFullScreenBtn.hidden = false;
+    } else {
+      fullScreenBtn.hidden = false;
+      exitFullScreenBtn.hidden = true;
+    }
+  });
+}
+
+const sidebarToggle = document.getElementById("sidebarToggle");
+const sidebar = document.getElementById("sidebar");
+
+if (sidebarToggle && sidebar) {
+  sidebarToggle.addEventListener("click", () => {
+    sidebar.classList.toggle("open");
+  });
+}
 
 const launcher = document.querySelector("#launcher");
 const viewer = document.querySelector("#viewer");
-const canvas = document.querySelector("#screen");
-const ctx = canvas.getContext("2d");
 const statusEl = document.querySelector("#status");
-const streamStatus = document.querySelector("#streamStatus");
 const sessionInput = document.querySelector("#sessionInput");
 const connectBtn = document.querySelector("#connectBtn");
 const startHostBtn = document.querySelector("#startHostBtn");
@@ -38,7 +80,9 @@ let drawX = 0;
 let drawY = 0;
 let hostCapture = null;
 let hostCanvas = null;
-let hostTimer = null;
+let intentionalDisconnect = false;
+let reconnectAttempts = 0;
+let reconnectTimer = null;
 
 clientModeBtn.addEventListener("click", () => setMode("client"));
 hostModeBtn.addEventListener("click", () => setMode("host"));
@@ -67,39 +111,33 @@ async function startClient() {
 
   showViewer();
   streamStatus.textContent = "Connecting...";
-  relay = openRelay("client", session);
-  relay.addEventListener("open", () => {
-    relay.send(encodeConnectRequest(session));
-    streamStatus.textContent = "Waiting for host approval...";
-  });
-  relay.addEventListener("message", handleClientMessage);
-  relay.addEventListener("close", () => {
-    streamStatus.textContent = "Disconnected";
-  });
+  intentionalDisconnect = false;
+  connectRelay("client", session);
 }
 
 async function startHost() {
-  statusEl.textContent = "Registering host...";
-  const register = await fetch(`${HTTP_BASE}/register`);
-  const { sessionId } = await register.json();
-  sessionInput.value = sessionId;
+  try {
+    statusEl.textContent = "Registering host...";
+    const register = await fetch(`${HTTP_BASE}/register`);
+    const { sessionId } = await register.json();
+    sessionInput.value = sessionId;
+    intentionalDisconnect = false;
 
-  hostCapture = await navigator.mediaDevices.getDisplayMedia({
-    video: { frameRate: 20 },
-    audio: false,
-  });
-  hostCanvas = document.createElement("canvas");
+    hostCapture = await navigator.mediaDevices.getDisplayMedia({
+      video: {
+        frameRate: { ideal: 60, max: 60 },
+        width: { ideal: 3840 },
+        height: { ideal: 2160 }
+      },
+      audio: false,
+    });
+    hostCanvas = document.createElement("canvas");
 
-  relay = openRelay("host", sessionId);
-  relay.addEventListener("open", () => {
-    statusEl.textContent = `Hosting. Session ID: ${sessionId}`;
-    startHostStreaming();
-  });
-  relay.addEventListener("message", handleHostMessage);
-  relay.addEventListener("close", () => {
-    statusEl.textContent = "Host relay disconnected.";
-    stopHostStreaming();
-  });
+    connectRelay("host", sessionId);
+  } catch (err) {
+    console.error("Host Error:", err);
+    statusEl.textContent = `Host Error: Screen sharing blocked or unsupported (${err.message}). Try opening in Chrome.`;
+  }
 }
 
 function openRelay(role, session) {
@@ -108,13 +146,94 @@ function openRelay(role, session) {
   return ws;
 }
 
+function connectRelay(role, session) {
+  clearTimeout(reconnectTimer);
+  relay?.close();
+  relay = openRelay(role, session);
+
+  relay.addEventListener("open", () => {
+    reconnectAttempts = 0;
+    if (role === "client") {
+      relay.send(encodeConnectRequest(session));
+      streamStatus.textContent = "Waiting for host approval...";
+    } else {
+      statusEl.textContent = `Hosting. Session ID: ${session}`;
+      if (!hostActive) startHostStreaming();
+    }
+  });
+
+  relay.addEventListener("message", role === "client" ? handleClientMessage : handleHostMessage);
+  relay.addEventListener("close", () => handleRelayClose(role, session));
+}
+
+function handleRelayClose(role, session) {
+  if (intentionalDisconnect) {
+    if (role === "host") stopHostStreaming();
+    if (role === "client") streamStatus.textContent = "Disconnected";
+    return;
+  }
+
+  reconnectAttempts += 1;
+  if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+    if (role === "host") {
+      statusEl.textContent = "Relay disconnected. Reconnect limit reached.";
+    } else {
+      streamStatus.textContent = "Disconnected";
+    }
+    return;
+  }
+
+  const delay = Math.min(1000 + reconnectAttempts * 500, 6000);
+  if (role === "host") {
+    statusEl.textContent = `Relay lost. Reconnecting (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`;
+  } else {
+    streamStatus.textContent = `Reconnecting (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`;
+  }
+  reconnectTimer = setTimeout(() => connectRelay(role, session), delay);
+}
+
+let pendingFrames = [];
+let isRendering = false;
+
+async function processFrames() {
+  if (isRendering) return;
+  isRendering = true;
+  
+  try {
+    let frameCount = 0;
+    while (pendingFrames.length > 0) {
+      const payload = pendingFrames.shift();
+      try {
+        await renderFrame(payload);
+      } catch (err) {
+        console.error("Frame render error:", err);
+      }
+      
+      frameCount++;
+      if (frameCount % 5 === 0) {
+        await new Promise(r => setTimeout(r, 0)); // Batch yield to eliminate scroll latency
+      }
+    }
+  } finally {
+    isRendering = false;
+  }
+}
+
 function handleClientMessage(event) {
   if (typeof event.data === "string") return;
   for (const msg of decodeMessages(event.data)) {
     if (msg.type === MessageType.ConnectResponse) {
       streamStatus.textContent = msg.payload[0] ? "Connected" : "Denied";
     } else if (msg.type === MessageType.FrameData) {
-      renderFrame(msg.payload);
+      if (msg.payload.byteLength >= 41) {
+        const view = new DataView(msg.payload.buffer, msg.payload.byteOffset, msg.payload.byteLength);
+        const isDelta = view.getUint8(32) !== 0;
+        if (!isDelta) {
+          pendingFrames = []; // Discard stale full frames to prevent flickering and lag
+        }
+      }
+      pendingFrames.push(msg.payload);
+      processFrames().catch(err => console.error("Render loop error:", err));
     } else if (msg.type === MessageType.Disconnect) {
       disconnect();
     }
@@ -125,28 +244,50 @@ function handleHostMessage(event) {
   if (typeof event.data === "string") return;
   for (const msg of decodeMessages(event.data)) {
     if (msg.type === MessageType.ConnectRequest) {
-      relay?.send(encodeConnectResponse(true, "OK"));
-    } else if (msg.type === MessageType.MouseEvent || msg.type === MessageType.KeyboardEvent) {
-      // Native input injection is handled by Tauri commands in the packaged app.
-      // The browser preview intentionally does not inject host OS input.
+      const allow = confirm("Incoming remote control request. Allow connection?");
+      relay?.send(encodeConnectResponse(allow, allow ? "OK" : "Denied"));
+    } else if (msg.type === MessageType.MouseEvent) {
+      if (window.__TAURI__ && window.__TAURI__.core) {
+        const view = new DataView(msg.payload.buffer, msg.payload.byteOffset, msg.payload.byteLength);
+        let x = view.getFloat32(0, true);
+        let y = view.getFloat32(4, true);
+
+        
+        const button = view.getUint8(8);
+        const isDown = view.getUint8(9) !== 0;
+        const wheelDelta = view.getInt32(10, true);
+        window.__TAURI__.core.invoke("inject_mouse", { x, y, button, isDown, wheelDelta }).catch(console.error);
+      }
+    } else if (msg.type === MessageType.KeyboardEvent) {
+      if (window.__TAURI__ && window.__TAURI__.core) {
+        const view = new DataView(msg.payload.buffer, msg.payload.byteOffset, msg.payload.byteLength);
+        const keycode = view.getUint16(0, true);
+        const isDown = view.getUint8(2) !== 0;
+        window.__TAURI__.core.invoke("inject_keyboard", { keycode, isDown }).catch(console.error);
+      }
     }
   }
 }
 
 async function renderFrame(payload) {
-  const frame = decodeFrame(payload);
-  if (!frame) return;
+  try {
+    const frame = decodeFrame(payload);
+    if (!frame) return;
 
-  if (frame.totalWidth !== remoteWidth || frame.totalHeight !== remoteHeight) {
-    remoteWidth = frame.totalWidth;
-    remoteHeight = frame.totalHeight;
-    resizeCanvas();
+    if (frame.totalWidth !== remoteWidth || frame.totalHeight !== remoteHeight) {
+      remoteWidth = frame.totalWidth;
+      remoteHeight = frame.totalHeight;
+      resizeCanvas();
+    }
+
+    const blob = new Blob([frame.jpeg], { type: "image/jpeg" });
+    const bitmap = await createImageBitmap(blob);
+    ctx.drawImage(bitmap, frame.targetX * drawScale + drawX, frame.targetY * drawScale + drawY, frame.updateWidth * drawScale, frame.updateHeight * drawScale);
+    bitmap.close();
+  } catch (err) {
+    console.error("RENDER ERROR:", err);
+    throw err;
   }
-
-  const blob = new Blob([frame.jpeg], { type: "image/jpeg" });
-  const bitmap = await createImageBitmap(blob);
-  ctx.drawImage(bitmap, frame.targetX * drawScale + drawX, frame.targetY * drawScale + drawY, frame.updateWidth * drawScale, frame.updateHeight * drawScale);
-  bitmap.close();
 }
 
 function resizeCanvas() {
@@ -154,6 +295,8 @@ function resizeCanvas() {
   canvas.height = window.innerHeight;
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
   if (!remoteWidth || !remoteHeight) return;
   const scaleX = canvas.width / remoteWidth;
   const scaleY = canvas.height / remoteHeight;
@@ -166,7 +309,11 @@ function sendInput(bytes) {
   if (relay?.readyState === WebSocket.OPEN) relay.send(bytes);
 }
 
+let lastMouseTime = 0;
 canvas.addEventListener("mousemove", (event) => {
+  const now = Date.now();
+  if (now - lastMouseTime < 16) return;
+  lastMouseTime = now;
   const pos = normalizedPosition(event);
   if (pos) sendInput(encodeMouseMove(pos.x, pos.y));
 });
@@ -181,7 +328,11 @@ canvas.addEventListener("mouseup", (event) => {
   if (pos) sendInput(encodeMouseButton(pos.x, pos.y, event.button === 2 ? 1 : 0, false));
 });
 
+let lastWheelTime = 0;
 canvas.addEventListener("wheel", (event) => {
+  const now = Date.now();
+  if (now - lastWheelTime < 16) return;
+  lastWheelTime = now;
   const pos = normalizedPosition(event);
   if (pos) sendInput(encodeMouseWheel(pos.x, pos.y, -Math.trunc(event.deltaY)));
   event.preventDefault();
@@ -209,11 +360,47 @@ function showViewer() {
 }
 
 function disconnect() {
+  intentionalDisconnect = true;
+  clearTimeout(reconnectTimer);
   stopHostStreaming();
   relay?.close();
   relay = null;
   viewer.hidden = true;
   launcher.hidden = false;
+}
+
+let hostActive = false;
+
+async function hostLoop(video, hostCtx) {
+  while (hostActive) {
+    if (!relay || relay.readyState !== WebSocket.OPEN || !video.videoWidth || !video.videoHeight) {
+      await new Promise(r => setTimeout(r, FRAME_INTERVAL_MS));
+      continue;
+    }
+
+    if (relay.bufferedAmount > MAX_RELAY_BUFFER_BYTES) {
+      await new Promise(r => setTimeout(r, FRAME_INTERVAL_MS));
+      continue;
+    }
+    
+    if (hostCanvas.width !== video.videoWidth || hostCanvas.height !== video.videoHeight) {
+      hostCanvas.width = video.videoWidth;
+      hostCanvas.height = video.videoHeight;
+    }
+    hostCtx.drawImage(video, 0, 0);
+    
+    try {
+      const blob = await new Promise((resolve) => hostCanvas.toBlob(resolve, "image/jpeg", JPEG_QUALITY));
+      if (blob && hostActive) {
+        const jpeg = new Uint8Array(await blob.arrayBuffer());
+        relay.send(encodeBrowserFrame(video.videoWidth, video.videoHeight, jpeg));
+      }
+    } catch (e) {
+      console.error("Host encode error:", e);
+    }
+    
+    await new Promise(r => setTimeout(r, FRAME_INTERVAL_MS));
+  }
 }
 
 function startHostStreaming() {
@@ -222,22 +409,14 @@ function startHostStreaming() {
   video.muted = true;
   video.play();
   const hostCtx = hostCanvas.getContext("2d");
-
-  hostTimer = window.setInterval(async () => {
-    if (!relay || relay.readyState !== WebSocket.OPEN || !video.videoWidth || !video.videoHeight) return;
-    hostCanvas.width = video.videoWidth;
-    hostCanvas.height = video.videoHeight;
-    hostCtx.drawImage(video, 0, 0);
-    const blob = await new Promise((resolve) => hostCanvas.toBlob(resolve, "image/jpeg", 0.74));
-    if (!blob) return;
-    const jpeg = new Uint8Array(await blob.arrayBuffer());
-    relay.send(encodeBrowserFrame(video.videoWidth, video.videoHeight, jpeg));
-  }, 66);
+  hostCtx.imageSmoothingEnabled = false;
+  
+  hostActive = true;
+  hostLoop(video, hostCtx);
 }
 
 function stopHostStreaming() {
-  if (hostTimer) window.clearInterval(hostTimer);
-  hostTimer = null;
+  hostActive = false;
   hostCapture?.getTracks().forEach((track) => track.stop());
   hostCapture = null;
 }
@@ -261,3 +440,9 @@ function encodeBrowserFrame(width, height, jpeg) {
 }
 
 setMode("client");
+
+setInterval(() => {
+  if (relay?.readyState === WebSocket.OPEN) {
+    sendInput(encodeMessage(MessageType.Heartbeat));
+  }
+}, 2000);

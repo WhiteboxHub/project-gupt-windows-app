@@ -4,33 +4,94 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Gupt Remote Desktop</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
   </head>
   <body>
+    <!-- Animated background mesh -->
+    <div class="bg-mesh">
+      <div class="orb orb-1"></div>
+      <div class="orb orb-2"></div>
+      <div class="orb orb-3"></div>
+    </div>
+
     <main id="app">
-      <section id="launcher" class="panel">
-        <header>
-          <h1>Gupt</h1>
-          <p>Cross-platform remote desktop preview</p>
-        </header>
-        <div class="mode-row">
-          <button id="clientMode" class="selected">Client</button>
-          <button id="hostMode">Host</button>
+      <!-- Launcher UI -->
+      <section id="launcher" class="launcher-wrapper">
+        <div class="glass-panel">
+          <header class="launcher-header">
+            <div class="logo-circle">
+              <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+            </div>
+            <h1>Gupt</h1>
+            <p>Premium Remote Control</p>
+          </header>
+          
+          <div class="mode-tabs">
+            <button id="clientMode" class="selected">Control</button>
+            <button id="hostMode">Share</button>
+          </div>
+          
+          <div class="input-group">
+            <label for="sessionInput">Session ID</label>
+            <div class="input-wrapper">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+              <input id="sessionInput" autocomplete="off" placeholder="Enter ID (e.g. A1B2C3D4)" />
+            </div>
+          </div>
+          
+          <div class="actions">
+            <button id="connectBtn" class="primary-btn">Connect Session</button>
+            <button id="startHostBtn" class="primary-btn" hidden>Start Hosting</button>
+          </div>
+          
+          <div class="status-container">
+            <div class="status-dot"></div>
+            <p id="status">Ready</p>
+          </div>
         </div>
-        <label>
-          Session ID
-          <input id="sessionInput" autocomplete="off" placeholder="ABC12345" />
-        </label>
-        <div class="actions">
-          <button id="connectBtn">Connect</button>
-          <button id="startHostBtn" hidden>Start Host</button>
-        </div>
-        <p id="status">Ready</p>
       </section>
+
+      <!-- Viewer UI -->
       <section id="viewer" hidden>
         <canvas id="screen"></canvas>
-        <aside id="toolbar">
-          <button id="disconnectBtn">Disconnect</button>
-          <span id="streamStatus">Disconnected</span>
+        
+        <!-- Premium Sidebar -->
+        <aside id="sidebar" class="glass-sidebar">
+          <button id="sidebarToggle" class="sidebar-toggle" title="Toggle Sidebar">
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+          </button>
+
+          <div class="sidebar-header">
+            <div class="logo-circle small">
+              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+            </div>
+            <h2>Gupt</h2>
+          </div>
+          
+          <div class="sidebar-status">
+            <div class="status-dot connected"></div>
+            <span id="streamStatus">Connected</span>
+          </div>
+
+          <div class="sidebar-controls">
+            <button id="fullScreenBtn" class="sidebar-btn" title="Full Screen">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+              <span>Full Screen</span>
+            </button>
+            <button id="exitFullScreenBtn" class="sidebar-btn" hidden title="Exit Full Screen">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/></svg>
+              <span>Exit Full Screen</span>
+            </button>
+            
+            <div class="spacer"></div>
+            
+            <button id="disconnectBtn" class="sidebar-btn danger" title="Disconnect">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#ff4757" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0M12 2v10"/></svg>
+              <span>Disconnect</span>
+            </button>
+          </div>
         </aside>
       </section>
     </main>
