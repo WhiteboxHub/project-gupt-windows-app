@@ -84,6 +84,29 @@
               <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/></svg>
               <span>Exit Full Screen</span>
             </button>
+
+            <div class="control-group">
+              <label for="viewModeSelect">View Size</label>
+              <select id="viewModeSelect">
+                <option value="contain">Fit Screen</option>
+                <option value="cover">Fill Screen</option>
+                <option value="stretch">Stretch</option>
+              </select>
+            </div>
+
+            <div class="control-group">
+              <label for="streamSizeSelect">Host Stream</label>
+              <select id="streamSizeSelect">
+                <option value="1">Original</option>
+                <option value="0.75">Balanced</option>
+                <option value="0.5">Fast</option>
+              </select>
+            </div>
+
+            <label class="checkbox-row" for="clipboardSyncToggle">
+              <input id="clipboardSyncToggle" type="checkbox" />
+              <span>Clipboard Sync</span>
+            </label>
             
             <div class="spacer"></div>
             

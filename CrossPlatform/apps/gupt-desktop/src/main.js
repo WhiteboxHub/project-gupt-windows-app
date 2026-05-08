@@ -6,6 +6,8 @@ import {
   encodeMessage,
   encodeConnectRequest,
   encodeConnectResponse,
+  decodeClipboardText,
+  encodeClipboardText,
   encodeKeyboard,
   encodeMouseButton,
   encodeMouseMove,
@@ -19,6 +21,7 @@ const FRAME_INTERVAL_MS = 16; // 60 FPS for low latency
 const JPEG_QUALITY = 0.9;
 const MAX_RECONNECT_ATTEMPTS = 30;
 const MAX_RELAY_BUFFER_BYTES = 2_000_000;
+const MAX_PENDING_FRAMES = 2;
 
 const statusMsg = document.getElementById("status");
 const streamStatus = document.getElementById("streamStatus");
@@ -27,6 +30,9 @@ const ctx = canvas.getContext("2d", { alpha: false });
 
 const fullScreenBtn = document.getElementById("fullScreenBtn");
 const exitFullScreenBtn = document.getElementById("exitFullScreenBtn");
+const viewModeSelect = document.getElementById("viewModeSelect");
+const streamSizeSelect = document.getElementById("streamSizeSelect");
+const clipboardSyncToggle = document.getElementById("clipboardSyncToggle");
 
 if (fullScreenBtn && exitFullScreenBtn) {
   fullScreenBtn.addEventListener("click", () => {
@@ -76,6 +82,8 @@ let relay = null;
 let remoteWidth = 0;
 let remoteHeight = 0;
 let drawScale = 1;
+let drawScaleX = 1;
+let drawScaleY = 1;
 let drawX = 0;
 let drawY = 0;
 let hostCapture = null;
@@ -83,14 +91,41 @@ let hostCanvas = null;
 let intentionalDisconnect = false;
 let reconnectAttempts = 0;
 let reconnectTimer = null;
+let viewMode = "contain";
+let streamScale = 1;
+let lastErrorReportAt = 0;
+let clipboardSyncEnabled = false;
+let lastLocalClipboardText = "";
+let lastRemoteClipboardText = "";
+let isPollingClipboard = false;
 
 clientModeBtn.addEventListener("click", () => setMode("client"));
 hostModeBtn.addEventListener("click", () => setMode("host"));
 connectBtn.addEventListener("click", startClient);
 startHostBtn.addEventListener("click", startHost);
 disconnectBtn.addEventListener("click", disconnect);
+viewModeSelect?.addEventListener("change", () => {
+  viewMode = viewModeSelect.value;
+  resizeCanvas();
+});
+streamSizeSelect?.addEventListener("change", () => {
+  streamScale = Number(streamSizeSelect.value) || 1;
+});
+clipboardSyncToggle?.addEventListener("change", () => {
+  clipboardSyncEnabled = clipboardSyncToggle.checked;
+  streamStatus.textContent = clipboardSyncEnabled ? "Clipboard sync on" : "Clipboard sync off";
+  if (clipboardSyncEnabled) {
+    pollClipboardSync({ reportBlocked: true });
+  }
+});
 
 window.addEventListener("resize", resizeCanvas);
+window.addEventListener("error", (event) => {
+  reportError("window-error", event.error || event.message);
+});
+window.addEventListener("unhandledrejection", (event) => {
+  reportError("unhandled-rejection", event.reason);
+});
 
 function setMode(nextMode) {
   mode = nextMode;
@@ -125,17 +160,21 @@ async function startHost() {
 
     hostCapture = await navigator.mediaDevices.getDisplayMedia({
       video: {
+        cursor: "always",
         frameRate: { ideal: 60, max: 60 },
         width: { ideal: 3840 },
         height: { ideal: 2160 }
       },
       audio: false,
     });
-    hostCanvas = document.createElement("canvas");
+    hostCanvas = typeof OffscreenCanvas !== "undefined"
+      ? new OffscreenCanvas(3840, 2160)
+      : document.createElement("canvas");
 
     connectRelay("host", sessionId);
   } catch (err) {
     console.error("Host Error:", err);
+    reportError("host-start", err);
     statusEl.textContent = `Host Error: Screen sharing blocked or unsupported (${err.message}). Try opening in Chrome.`;
   }
 }
@@ -164,6 +203,9 @@ function connectRelay(role, session) {
 
   relay.addEventListener("message", role === "client" ? handleClientMessage : handleHostMessage);
   relay.addEventListener("close", () => handleRelayClose(role, session));
+  relay.addEventListener("error", () => {
+    reportError(`${role}-relay`, `Relay websocket error for session ${session}`);
+  });
 }
 
 function handleRelayClose(role, session) {
@@ -180,6 +222,7 @@ function handleRelayClose(role, session) {
     } else {
       streamStatus.textContent = "Disconnected";
     }
+    reportError(`${role}-relay`, "Relay disconnected. Reconnect limit reached.");
     return;
   }
 
@@ -207,6 +250,7 @@ async function processFrames() {
         await renderFrame(payload);
       } catch (err) {
         console.error("Frame render error:", err);
+        reportError("client-render-frame", err);
       }
       
       frameCount++;
@@ -230,12 +274,16 @@ function handleClientMessage(event) {
         const isDelta = view.getUint8(32) !== 0;
         if (!isDelta) {
           pendingFrames = []; // Discard stale full frames to prevent flickering and lag
+        } else if (pendingFrames.length >= MAX_PENDING_FRAMES) {
+          pendingFrames = pendingFrames.slice(-1);
         }
       }
       pendingFrames.push(msg.payload);
       processFrames().catch(err => console.error("Render loop error:", err));
     } else if (msg.type === MessageType.Disconnect) {
       disconnect();
+    } else if (msg.type === MessageType.ClipboardText) {
+      receiveClipboardText(msg.payload);
     }
   }
 }
@@ -249,22 +297,28 @@ function handleHostMessage(event) {
     } else if (msg.type === MessageType.MouseEvent) {
       if (window.__TAURI__ && window.__TAURI__.core) {
         const view = new DataView(msg.payload.buffer, msg.payload.byteOffset, msg.payload.byteLength);
-        let x = view.getFloat32(0, true);
-        let y = view.getFloat32(4, true);
-
-        
+        const x = view.getFloat32(0, true);
+        const y = view.getFloat32(4, true);
         const button = view.getUint8(8);
         const isDown = view.getUint8(9) !== 0;
         const wheelDelta = view.getInt32(10, true);
-        window.__TAURI__.core.invoke("inject_mouse", { x, y, button, isDown, wheelDelta }).catch(console.error);
+        window.__TAURI__.core.invoke("inject_mouse", { x, y, button, isDown, wheelDelta }).catch((err) => {
+          console.error(err);
+          reportError("host-inject-mouse", err);
+        });
       }
     } else if (msg.type === MessageType.KeyboardEvent) {
       if (window.__TAURI__ && window.__TAURI__.core) {
         const view = new DataView(msg.payload.buffer, msg.payload.byteOffset, msg.payload.byteLength);
         const keycode = view.getUint16(0, true);
         const isDown = view.getUint8(2) !== 0;
-        window.__TAURI__.core.invoke("inject_keyboard", { keycode, isDown }).catch(console.error);
+        window.__TAURI__.core.invoke("inject_keyboard", { keycode, isDown }).catch((err) => {
+          console.error(err);
+          reportError("host-inject-keyboard", err);
+        });
       }
+    } else if (msg.type === MessageType.ClipboardText) {
+      receiveClipboardText(msg.payload);
     }
   }
 }
@@ -282,7 +336,13 @@ async function renderFrame(payload) {
 
     const blob = new Blob([frame.jpeg], { type: "image/jpeg" });
     const bitmap = await createImageBitmap(blob);
-    ctx.drawImage(bitmap, frame.targetX * drawScale + drawX, frame.targetY * drawScale + drawY, frame.updateWidth * drawScale, frame.updateHeight * drawScale);
+    ctx.drawImage(
+      bitmap,
+      frame.targetX * drawScaleX + drawX,
+      frame.targetY * drawScaleY + drawY,
+      frame.updateWidth * drawScaleX,
+      frame.updateHeight * drawScaleY
+    );
     bitmap.close();
   } catch (err) {
     console.error("RENDER ERROR:", err);
@@ -291,8 +351,9 @@ async function renderFrame(payload) {
 }
 
 function resizeCanvas() {
-  canvas.width = window.innerWidth;
-  canvas.height = window.innerHeight;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = window.innerWidth * dpr;
+  canvas.height = window.innerHeight * dpr;
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.imageSmoothingEnabled = true;
@@ -300,7 +361,17 @@ function resizeCanvas() {
   if (!remoteWidth || !remoteHeight) return;
   const scaleX = canvas.width / remoteWidth;
   const scaleY = canvas.height / remoteHeight;
-  drawScale = Math.min(scaleX, scaleY);
+  if (viewMode === "stretch") {
+    drawScale = 1;
+    drawScaleX = scaleX;
+    drawScaleY = scaleY;
+    drawX = 0;
+    drawY = 0;
+    return;
+  }
+  drawScale = viewMode === "cover" ? Math.max(scaleX, scaleY) : Math.min(scaleX, scaleY);
+  drawScaleX = drawScale;
+  drawScaleY = drawScale;
   drawX = Math.floor((canvas.width - remoteWidth * drawScale) / 2);
   drawY = Math.floor((canvas.height - remoteHeight * drawScale) / 2);
 }
@@ -338,17 +409,30 @@ canvas.addEventListener("wheel", (event) => {
   event.preventDefault();
 }, { passive: false });
 
+let isMouseOverScreen = false;
+canvas.addEventListener("mouseenter", () => isMouseOverScreen = true);
+canvas.addEventListener("mouseleave", () => isMouseOverScreen = false);
+
 window.addEventListener("keydown", (event) => {
-  if (!viewer.hidden) sendInput(encodeKeyboard(event.keyCode || event.which, true));
+  if (!viewer.hidden && isMouseOverScreen) {
+    sendInput(encodeKeyboard(event.keyCode || event.which, true));
+    event.preventDefault();
+  }
 });
 
 window.addEventListener("keyup", (event) => {
-  if (!viewer.hidden) sendInput(encodeKeyboard(event.keyCode || event.which, false));
+  if (!viewer.hidden && isMouseOverScreen) {
+    sendInput(encodeKeyboard(event.keyCode || event.which, false));
+    event.preventDefault();
+  }
 });
 
 function normalizedPosition(event) {
-  const x = (event.clientX - drawX) / (remoteWidth * drawScale);
-  const y = (event.clientY - drawY) / (remoteHeight * drawScale);
+  const dpr = window.devicePixelRatio || 1;
+  const physicalX = event.clientX * dpr;
+  const physicalY = event.clientY * dpr;
+  const x = (physicalX - drawX) / (remoteWidth * drawScaleX);
+  const y = (physicalY - drawY) / (remoteHeight * drawScaleY);
   if (x < 0 || x > 1 || y < 0 || y > 1) return null;
   return { x, y };
 }
@@ -371,36 +455,75 @@ function disconnect() {
 
 let hostActive = false;
 
+let currentQuality = JPEG_QUALITY;
+
 async function hostLoop(video, hostCtx) {
-  while (hostActive) {
-    if (!relay || relay.readyState !== WebSocket.OPEN || !video.videoWidth || !video.videoHeight) {
-      await new Promise(r => setTimeout(r, FRAME_INTERVAL_MS));
-      continue;
+  let isEncoding = false;
+
+  const processFrame = async () => {
+    if (!hostActive) return;
+    
+    if (isEncoding) {
+      scheduleNext();
+      return;
     }
 
+    if (!relay || relay.readyState !== WebSocket.OPEN || !video.videoWidth || !video.videoHeight) {
+      scheduleNext();
+      return;
+    }
+
+    // Adaptive Streaming: Skip encoding entirely if network is completely jammed
     if (relay.bufferedAmount > MAX_RELAY_BUFFER_BYTES) {
-      await new Promise(r => setTimeout(r, FRAME_INTERVAL_MS));
-      continue;
+      scheduleNext();
+      return;
     }
-    
-    if (hostCanvas.width !== video.videoWidth || hostCanvas.height !== video.videoHeight) {
-      hostCanvas.width = video.videoWidth;
-      hostCanvas.height = video.videoHeight;
+
+    // Smoother Adaptive Quality
+    if (relay.bufferedAmount > 1_000_000) {
+      currentQuality = 0.5; // High motion/buffer pressure
+    } else if (relay.bufferedAmount > 400_000) {
+      currentQuality = 0.8; // Medium pressure
+    } else {
+      currentQuality = JPEG_QUALITY; // 0.9 - Crystal clear
     }
-    hostCtx.drawImage(video, 0, 0);
-    
+
+    isEncoding = true;
     try {
-      const blob = await new Promise((resolve) => hostCanvas.toBlob(resolve, "image/jpeg", JPEG_QUALITY));
+      const targetWidth = Math.max(1, Math.round(video.videoWidth * streamScale));
+      const targetHeight = Math.max(1, Math.round(video.videoHeight * streamScale));
+      if (hostCanvas.width !== targetWidth || hostCanvas.height !== targetHeight) {
+        hostCanvas.width = targetWidth;
+        hostCanvas.height = targetHeight;
+      }
+      hostCtx.drawImage(video, 0, 0, targetWidth, targetHeight);
+
+      let blob;
+      if (hostCanvas.convertToBlob) {
+        blob = await hostCanvas.convertToBlob({ type: "image/jpeg", quality: currentQuality });
+      } else {
+        blob = await new Promise((resolve) => hostCanvas.toBlob(resolve, "image/jpeg", currentQuality));
+      }
+      
       if (blob && hostActive) {
         const jpeg = new Uint8Array(await blob.arrayBuffer());
-        relay.send(encodeBrowserFrame(video.videoWidth, video.videoHeight, jpeg));
+        relay.send(encodeBrowserFrame(targetWidth, targetHeight, jpeg));
       }
     } catch (e) {
       console.error("Host encode error:", e);
+      reportError("host-encode-frame", e);
+    } finally {
+      isEncoding = false;
+      scheduleNext();
     }
-    
-    await new Promise(r => setTimeout(r, FRAME_INTERVAL_MS));
-  }
+  };
+
+  const scheduleNext = () => {
+    if (!hostActive) return;
+    setTimeout(processFrame, FRAME_INTERVAL_MS);
+  };
+
+  scheduleNext();
 }
 
 function startHostStreaming() {
@@ -409,7 +532,8 @@ function startHostStreaming() {
   video.muted = true;
   video.play();
   const hostCtx = hostCanvas.getContext("2d");
-  hostCtx.imageSmoothingEnabled = false;
+  hostCtx.imageSmoothingEnabled = true;
+  hostCtx.imageSmoothingQuality = "high";
   
   hostActive = true;
   hostLoop(video, hostCtx);
@@ -439,6 +563,98 @@ function encodeBrowserFrame(width, height, jpeg) {
   return encodeMessage(MessageType.FrameData, payload);
 }
 
+function sendClipboardTextValue(text, transferMode = "auto") {
+  lastLocalClipboardText = text;
+  sendInput(encodeClipboardText(text, transferMode));
+}
+
+async function receiveClipboardText(payload, options = {}) {
+  try {
+    const { text, transferMode } = decodeClipboardText(payload);
+    if ((options.automatic || transferMode === "auto") && !clipboardSyncEnabled) return;
+
+    lastRemoteClipboardText = text;
+    lastLocalClipboardText = text;
+    await navigator.clipboard.writeText(text);
+    streamStatus.textContent = transferMode === "auto" ? "Clipboard synced" : "Clipboard received";
+  } catch (err) {
+    reportError("clipboard-receive", err);
+  }
+}
+
+async function pollClipboardSync(options = {}) {
+  if (!clipboardSyncEnabled || isPollingClipboard || relay?.readyState !== WebSocket.OPEN) return;
+
+  isPollingClipboard = true;
+  try {
+    const text = await navigator.clipboard.readText();
+    if (text !== lastLocalClipboardText && text !== lastRemoteClipboardText) {
+      sendClipboardTextValue(text, "auto");
+      streamStatus.textContent = "Clipboard synced";
+    }
+    lastLocalClipboardText = text;
+  } catch (err) {
+    streamStatus.textContent = "Clipboard permission needed";
+    if (options.reportBlocked) {
+      reportError("clipboard-sync-poll", err);
+    }
+  } finally {
+    isPollingClipboard = false;
+  }
+}
+
+async function reportError(context, err) {
+  const now = Date.now();
+  if (now - lastErrorReportAt < 1000) return;
+  lastErrorReportAt = now;
+
+  const message = errorMessage(err);
+  const screenshotDataUrl = await captureErrorScreenshot().catch(() => null);
+  if (window.__TAURI__?.core) {
+    window.__TAURI__.core.invoke("save_error_report", {
+      role: mode,
+      context,
+      message,
+      screenshotDataUrl,
+    }).catch((saveErr) => console.error("Error report save failed:", saveErr));
+  } else {
+    console.error(`[${context}] ${message}`);
+  }
+}
+
+async function captureErrorScreenshot() {
+  if (!viewer.hidden && canvas.width > 0 && canvas.height > 0) {
+    return canvas.toDataURL("image/png");
+  }
+  if (hostCanvas?.convertToBlob) {
+    const blob = await hostCanvas.convertToBlob({ type: "image/png" });
+    return blobToDataUrl(blob);
+  }
+  if (hostCanvas?.toDataURL) {
+    return hostCanvas.toDataURL("image/png");
+  }
+  return null;
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+function errorMessage(err) {
+  if (err instanceof Error) return `${err.name}: ${err.message}\n${err.stack || ""}`;
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
 setMode("client");
 
 setInterval(() => {
@@ -446,3 +662,7 @@ setInterval(() => {
     sendInput(encodeMessage(MessageType.Heartbeat));
   }
 }, 2000);
+
+setInterval(() => {
+  pollClipboardSync();
+}, 1000);

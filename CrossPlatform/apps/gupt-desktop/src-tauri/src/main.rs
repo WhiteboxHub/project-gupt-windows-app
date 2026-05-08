@@ -1,8 +1,14 @@
+use base64::{engine::general_purpose, Engine as _};
 use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use gupt_core::platform;
 use lazy_static::lazy_static;
 use serde::Serialize;
-use std::sync::Mutex;
+use std::{
+    fs,
+    path::PathBuf,
+    sync::Mutex,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 const MOUSE_BUTTON_MOVE_ONLY: u8 = 255;
 
@@ -80,13 +86,50 @@ fn inject_keyboard(keycode: u16, is_down: bool) -> Result<(), String> {
         .map_err(|err| err.to_string())
 }
 
+#[tauri::command]
+fn save_error_report(
+    role: String,
+    context: String,
+    message: String,
+    screenshot_data_url: Option<String>,
+) -> Result<String, String> {
+    let report_dir = gupt_report_dir()?;
+    fs::create_dir_all(&report_dir).map_err(|err| err.to_string())?;
+
+    let timestamp = unix_millis();
+    let safe_context = sanitize_filename(&context);
+    let base_name = format!("{timestamp}-{}-{safe_context}", sanitize_filename(&role));
+    let log_path = report_dir.join(format!("{base_name}.log"));
+    let screenshot_path = report_dir.join(format!("{base_name}.png"));
+
+    let mut body = String::new();
+    body.push_str("Gupt error report\n");
+    body.push_str(&format!("timestamp_ms: {timestamp}\n"));
+    body.push_str(&format!("role: {role}\n"));
+    body.push_str(&format!("context: {context}\n"));
+    body.push_str("message:\n");
+    body.push_str(&message);
+    body.push('\n');
+
+    if let Some(data_url) = screenshot_data_url {
+        if let Some(png) = decode_png_data_url(&data_url)? {
+            fs::write(&screenshot_path, png).map_err(|err| err.to_string())?;
+            body.push_str(&format!("screenshot: {}\n", screenshot_path.display()));
+        }
+    }
+
+    fs::write(&log_path, body).map_err(|err| err.to_string())?;
+    Ok(log_path.display().to_string())
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             platform_capabilities,
             inject_input_preview,
             inject_mouse,
-            inject_keyboard
+            inject_keyboard,
+            save_error_report
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Gupt desktop app");
@@ -107,7 +150,7 @@ fn input_controller() -> Result<std::sync::MutexGuard<'static, Option<Enigo>>, S
     Ok(input)
 }
 
-fn display_size_for_input(window: &tauri::Window, input: &Enigo) -> Result<(i32, i32), String> {
+fn display_size_for_input(_window: &tauri::Window, _input: &Enigo) -> Result<(i32, i32), String> {
     #[cfg(target_os = "macos")]
     {
         use core_graphics::display::CGDisplay;
@@ -117,7 +160,7 @@ fn display_size_for_input(window: &tauri::Window, input: &Enigo) -> Result<(i32,
 
     #[cfg(not(target_os = "macos"))]
     {
-        if let Some(monitor) = window.current_monitor().map_err(|err| err.to_string())? {
+        if let Some(monitor) = _window.current_monitor().map_err(|err| err.to_string())? {
             let size = monitor.size();
             let scale = monitor.scale_factor().max(1.0);
             return Ok((
@@ -125,13 +168,66 @@ fn display_size_for_input(window: &tauri::Window, input: &Enigo) -> Result<(i32,
                 ((size.height as f64) / scale).round() as i32,
             ));
         }
-        input.main_display().map_err(|err| err.to_string())
+        _input.main_display().map_err(|err| err.to_string())
     }
 }
 
 fn normalized_to_pixel(value: f32, size: i32) -> i32 {
     let max = size.saturating_sub(1).max(0) as f32;
     (value.clamp(0.0, 1.0) * max).round() as i32
+}
+
+fn gupt_report_dir() -> Result<PathBuf, String> {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            return Ok(PathBuf::from(appdata).join("Gupt").join("reports"));
+        }
+    }
+
+    if let Some(home) = std::env::var_os("HOME") {
+        return Ok(PathBuf::from(home)
+            .join("Library")
+            .join("Logs")
+            .join("Gupt")
+            .join("reports"));
+    }
+
+    std::env::current_dir()
+        .map(|path| path.join("gupt-reports"))
+        .map_err(|err| err.to_string())
+}
+
+fn unix_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+}
+
+fn sanitize_filename(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    sanitized.trim_matches('-').chars().take(48).collect()
+}
+
+fn decode_png_data_url(data_url: &str) -> Result<Option<Vec<u8>>, String> {
+    let Some(payload) = data_url.strip_prefix("data:image/png;base64,") else {
+        return Ok(None);
+    };
+    general_purpose::STANDARD
+        .decode(payload)
+        .map(Some)
+        .map_err(|err| err.to_string())
 }
 
 fn key_direction(is_down: bool) -> Direction {
