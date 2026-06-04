@@ -78,6 +78,9 @@ server.on('upgrade', (request, socket, head) => {
 
 // --- Relay WebSocket: transparent binary proxy between host and client ---
 relayWss.on('connection', (ws, req) => {
+    ws.isAlive = true;
+    ws.on('pong', heartbeat);
+
     const parsedUrl = url.parse(req.url, true);
     const { role, session } = parsedUrl.query;
 
@@ -197,15 +200,21 @@ signalingWss.on('connection', (ws, req) => {
     });
 });
 
-const interval = setInterval(() => {
-    signalingWss.clients.forEach((ws) => {
+function pingClients(wss) {
+    wss.clients.forEach((ws) => {
         if (ws.isAlive === false) return ws.terminate();
         ws.isAlive = false;
         ws.ping();
     });
+}
+
+const interval = setInterval(() => {
+    pingClients(signalingWss);
+    pingClients(relayWss);
 }, 30000);
 
 signalingWss.on('close', () => clearInterval(interval));
+relayWss.on('close', () => clearInterval(interval));
 
 server.listen(port, () => {
     console.log(`[START] Gupt Signaling + Relay Server running on port ${port}`);

@@ -1,0 +1,13 @@
+[workspace]
+members = [
+    "crates/gupt-core",
+]
+exclude = [
+    "apps/gupt-desktop/src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Proprietary"
+repository = "https://github.com/WhiteboxHub/project-gupt-windows-app"
