@@ -110,6 +110,7 @@ int main() {
             } else if (type == shared::MessageType::Disconnect) {
                 std::cout << "Client disconnected." << std::endl;
                 g_SessionActive = false;
+                injector.ReleaseAll();
             }
         }
     });
@@ -138,15 +139,23 @@ int main() {
                             if (len > 1) {
                                 std::string currentText(len - 1, '\0');
                                 WideCharToMultiByte(CP_UTF8, 0, wText, -1, &currentText[0], len, NULL, NULL);
+                                GlobalUnlock(hData);
+                                CloseClipboard(); // Close before sending
+                                bool sent = false;
                                 {
                                     std::lock_guard<std::mutex> lk(clipMutex);
                                     if (currentText != lastSentText && currentText != lastReceivedFromClient) {
                                         lastSentText = currentText;
-                                        server.SendRaw(shared::SerializeClipboardText(currentText));
+                                        sent = true;
                                     }
                                 }
+                                if (sent) {
+                                    server.SendRaw(shared::SerializeClipboardText(currentText));
+                                }
+                                continue; // Skip the rest of the loop since clipboard is already closed
+                            } else {
+                                GlobalUnlock(hData);
                             }
-                            GlobalUnlock(hData);
                         }
                     }
                 }
@@ -163,8 +172,10 @@ int main() {
                             std::vector<uint8_t> dib(size);
                             std::memcpy(dib.data(), ptr, size);
                             GlobalUnlock(hData);
+                            CloseClipboard(); // Close before sending
                             server.SendRaw(shared::SerializeClipboardImage(dib));
                             s_lastImageSequence = currentSequence;
+                            continue; // Skip the rest of the loop since clipboard is already closed
                         }
                     }
                 }
