@@ -84,6 +84,10 @@ void TcpServer::AcceptThread() {
             int flag = 1;
             setsockopt(clientSocket, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
             
+            DWORD timeoutMs = 3000;
+            setsockopt(clientSocket, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeoutMs, sizeof(timeoutMs));
+
+            
             if (m_ClientSocket != INVALID_SOCKET) {
                 closesocket(m_ClientSocket);
             }
@@ -202,6 +206,10 @@ bool TcpClient::Connect(const std::string& host, uint16_t port) {
 
     int flag = 1;
     setsockopt(m_Socket, IPPROTO_TCP, TCP_NODELAY, (char*)&flag, sizeof(flag));
+
+    DWORD timeoutMs = 3000;
+    setsockopt(m_Socket, SOL_SOCKET, SO_SNDTIMEO, (char*)&timeoutMs, sizeof(timeoutMs));
+
 
     m_IsConnected = true;
     std::thread(&TcpClient::ReceiveThread, this).detach();

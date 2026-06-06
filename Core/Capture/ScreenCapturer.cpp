@@ -36,6 +36,7 @@ void ScreenCapturer::Reset() {
     m_DeskDupl.Reset();
     m_DeviceContext.Reset();
     m_Device.Reset();
+    m_StagingTexture.Reset();
     m_Width = 0;
     m_Height = 0;
     m_LastDirtyBounds = { 0, 0, 0, 0 };
@@ -73,16 +74,29 @@ bool ScreenCapturer::CaptureNextFrame(std::vector<uint8_t>& outPixels, uint32_t&
 
     ComPtr<ID3D11Texture2D> tex; if (FAILED(resource.As(&tex))) { m_DeskDupl->ReleaseFrame(); return false; }
     D3D11_TEXTURE2D_DESC desc; tex->GetDesc(&desc);
-    desc.BindFlags = 0; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ; desc.Usage = D3D11_USAGE_STAGING; desc.MiscFlags = 0;
-    ComPtr<ID3D11Texture2D> staging; if (FAILED(m_Device->CreateTexture2D(&desc, NULL, &staging))) { m_DeskDupl->ReleaseFrame(); return false; }
-    m_DeviceContext->CopyResource(staging.Get(), tex.Get());
-    D3D11_MAPPED_SUBRESOURCE map; if (FAILED(m_DeviceContext->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &map))) { m_DeskDupl->ReleaseFrame(); return false; }
+    
+    bool needsNewStaging = true;
+    if (m_StagingTexture) {
+        D3D11_TEXTURE2D_DESC stagingDesc;
+        m_StagingTexture->GetDesc(&stagingDesc);
+        if (stagingDesc.Width == desc.Width && stagingDesc.Height == desc.Height && stagingDesc.Format == desc.Format) {
+            needsNewStaging = false;
+        }
+    }
+
+    if (needsNewStaging) {
+        desc.BindFlags = 0; desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ; desc.Usage = D3D11_USAGE_STAGING; desc.MiscFlags = 0;
+        if (FAILED(m_Device->CreateTexture2D(&desc, NULL, &m_StagingTexture))) { m_DeskDupl->ReleaseFrame(); return false; }
+    }
+
+    m_DeviceContext->CopyResource(m_StagingTexture.Get(), tex.Get());
+    D3D11_MAPPED_SUBRESOURCE map; if (FAILED(m_DeviceContext->Map(m_StagingTexture.Get(), 0, D3D11_MAP_READ, 0, &map))) { m_DeskDupl->ReleaseFrame(); return false; }
     outWidth = desc.Width; outHeight = desc.Height;
     outPixels.resize(outWidth * outHeight * 4);
     for (uint32_t y = 0; y < outHeight; ++y) {
         memcpy(outPixels.data() + y * outWidth * 4, (uint8_t*)map.pData + y * map.RowPitch, outWidth * 4);
     }
-    m_DeviceContext->Unmap(staging.Get(), 0);
+    m_DeviceContext->Unmap(m_StagingTexture.Get(), 0);
 
     m_HasLastDirtyBounds = false;
     m_LastDirtyBounds = { 0, 0, 0, 0 };

@@ -30,6 +30,7 @@ private:
     ComPtr<ID3D11Device> m_Device;
     ComPtr<ID3D11DeviceContext> m_DeviceContext;
     ComPtr<IDXGIOutputDuplication> m_DeskDupl;
+    ComPtr<ID3D11Texture2D> m_StagingTexture;
     uint32_t m_Width = 0;
     uint32_t m_Height = 0;
     RECT m_LastDirtyBounds = { 0, 0, 0, 0 };
