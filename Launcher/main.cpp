@@ -150,7 +150,7 @@ static void HostEncoderLoop(gupt::core::capture::ScreenCapturer* capturer) {
                     uint64_t regionPixels = static_cast<uint64_t>(tw) * static_cast<uint64_t>(th);
                     uint64_t screenPixels = static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
                     bool videoLike = regionPixels > (screenPixels / 3);
-                    int quality = videoLike ? 85 : 95;
+                    int quality = videoLike ? 92 : 100;
                     bool force444 = true; // Always use 4:4:4 chroma for perfect text
                     if(capturer->CaptureRegionJpeg(raw, w, h, minX, minY, tw, th, jpg, quality, force444)){
                         PushOutbound(gupt::shared::SerializeFrame({0, w, h, tw, th, minX, minY, 32, (tw < w || th < h), 0}, jpg), false);

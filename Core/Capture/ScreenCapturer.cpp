@@ -58,6 +58,45 @@ bool ScreenCapturer::Initialize() {
     return true;
 }
 
+static void DrawCursorToPixels(std::vector<uint8_t>& pixels, uint32_t width, uint32_t height) {
+    CURSORINFO ci = {0}; ci.cbSize = sizeof(CURSORINFO);
+    if (!GetCursorInfo(&ci) || ci.flags != CURSOR_SHOWING) return;
+    ICONINFO ii = {0}; if (!GetIconInfo(ci.hCursor, &ii)) return;
+
+    HDC hdcScreen = GetDC(NULL); HDC hdcMem = CreateCompatibleDC(hdcScreen);
+    BITMAPINFO bmi = {0}; bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = 64; bmi.bmiHeader.biHeight = -64; 
+    bmi.bmiHeader.biPlanes = 1; bmi.bmiHeader.biBitCount = 32; bmi.bmiHeader.biCompression = BI_RGB;
+    
+    void* bits = nullptr; HBITMAP hbm = CreateDIBSection(hdcScreen, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (hbm) {
+        HBITMAP hOld = (HBITMAP)SelectObject(hdcMem, hbm);
+        memset(bits, 0, 64 * 64 * 4);
+        DrawIconEx(hdcMem, 0, 0, ci.hCursor, 0, 0, 0, NULL, DI_NORMAL);
+        int cursorX = ci.ptScreenPos.x - ii.xHotspot; int cursorY = ci.ptScreenPos.y - ii.yHotspot;
+        for (int y = 0; y < 64; ++y) {
+            for (int x = 0; x < 64; ++x) {
+                int px = cursorX + x; int py = cursorY + y;
+                if (px >= 0 && px < (int)width && py >= 0 && py < (int)height) {
+                    uint8_t* src = (uint8_t*)bits + (y * 64 + x) * 4;
+                    uint8_t a = src[3];
+                    // Handle legacy cursors without alpha channel
+                    if (a == 0 && (src[0] != 0 || src[1] != 0 || src[2] != 0)) a = 255;
+                    if (a > 0) {
+                        size_t dstIdx = (py * width + px) * 4;
+                        pixels[dstIdx + 0] = (src[0] * a + pixels[dstIdx + 0] * (255 - a)) / 255;
+                        pixels[dstIdx + 1] = (src[1] * a + pixels[dstIdx + 1] * (255 - a)) / 255;
+                        pixels[dstIdx + 2] = (src[2] * a + pixels[dstIdx + 2] * (255 - a)) / 255;
+                    }
+                }
+            }
+        }
+        SelectObject(hdcMem, hOld); DeleteObject(hbm);
+    }
+    DeleteDC(hdcMem); ReleaseDC(NULL, hdcScreen);
+    if (ii.hbmMask) DeleteObject(ii.hbmMask); if (ii.hbmColor) DeleteObject(ii.hbmColor);
+}
+
 bool ScreenCapturer::CaptureNextFrame(std::vector<uint8_t>& outPixels, uint32_t& outWidth, uint32_t& outHeight) {
     if (!m_DeskDupl && !Initialize()) return false;
     ComPtr<IDXGIResource> resource; DXGI_OUTDUPL_FRAME_INFO info;
@@ -137,6 +176,10 @@ bool ScreenCapturer::CaptureNextFrame(std::vector<uint8_t>& outPixels, uint32_t&
     m_DeskDupl->ReleaseFrame();
 
     for (size_t i = 3; i < outPixels.size(); i += 4) outPixels[i] = 0xFF;
+    
+    // Composite hardware cursor onto the frame
+    DrawCursorToPixels(outPixels, outWidth, outHeight);
+    
     return true;
 }
 

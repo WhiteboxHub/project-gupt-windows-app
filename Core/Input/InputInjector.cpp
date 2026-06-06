@@ -30,7 +30,7 @@ void InputInjector::IngestMouseEvent(const gupt::shared::MouseEvent& ev) {
     input.type = INPUT_MOUSE;
     input.mi.dx = static_cast<LONG>(ev.normalizedX * 65535.0f);
     input.mi.dy = static_cast<LONG>(ev.normalizedY * 65535.0f);
-    input.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK;
+    input.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE;
 
     if (ev.wheelDelta != 0) {
         input.mi.dwFlags |= MOUSEEVENTF_WHEEL;
