@@ -5,6 +5,7 @@
 #include <ws2tcpip.h>
 #include <vector>
 #include <functional>
+#include <mutex>
 #include "../../Shared/Protocol.h"
 
 // Tell linker to pull in Winsock
@@ -36,6 +37,7 @@ private:
     SOCKET m_ClientSocket = INVALID_SOCKET;
     MessageCallback m_Callback;
     bool m_IsRunning = false;
+    std::mutex m_SendMutex;
 };
 
 class TcpClient {
@@ -55,6 +57,7 @@ private:
     SOCKET m_Socket = INVALID_SOCKET;
     MessageCallback m_Callback;
     bool m_IsConnected = false;
+    std::mutex m_SendMutex;
 };
 
 } // namespace network

@@ -60,6 +60,8 @@ void TcpServer::Stop() {
 bool TcpServer::SendRaw(const std::vector<uint8_t>& data) {
     if (m_ClientSocket == INVALID_SOCKET) return false;
     
+    std::lock_guard<std::mutex> lock(m_SendMutex);
+    
     int totalSent = 0;
     int dataSize = static_cast<int>(data.size());
     const char* ptr = reinterpret_cast<const char*>(data.data());
@@ -216,6 +218,8 @@ void TcpClient::Disconnect() {
 
 bool TcpClient::SendRaw(const std::vector<uint8_t>& data) {
     if (m_Socket == INVALID_SOCKET || !m_IsConnected) return false;
+    
+    std::lock_guard<std::mutex> lock(m_SendMutex);
     
     int totalSent = 0;
     int dataSize = static_cast<int>(data.size());
