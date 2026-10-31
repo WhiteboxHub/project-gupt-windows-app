@@ -150,8 +150,8 @@ static void HostEncoderLoop(gupt::core::capture::ScreenCapturer* capturer) {
                     uint64_t regionPixels = static_cast<uint64_t>(tw) * static_cast<uint64_t>(th);
                     uint64_t screenPixels = static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
                     bool videoLike = regionPixels > (screenPixels / 3);
-                    int quality = videoLike ? 72 : 88;
-                    bool force444 = !videoLike;
+                    int quality = videoLike ? 85 : 95;
+                    bool force444 = true; // Always use 4:4:4 chroma for perfect text
                     if(capturer->CaptureRegionJpeg(raw, w, h, minX, minY, tw, th, jpg, quality, force444)){
                         PushOutbound(gupt::shared::SerializeFrame({0, w, h, tw, th, minX, minY, 32, (tw < w || th < h), 0}, jpg), false);
                     }
@@ -470,6 +470,15 @@ LRESULT CALLBACK ClientWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_KEYDOWN: case WM_SYSKEYDOWN: case WM_KEYUP: case WM_SYSKEYUP: { if(wp==VK_F11 && (msg==WM_KEYDOWN||msg==WM_SYSKEYDOWN)){ g_IsFullscreen=!g_IsFullscreen; if(g_IsFullscreen){ GetWindowRect(hWnd,&g_SavedRect); SetWindowLongPtrA(hWnd,GWL_STYLE,WS_POPUP|WS_VISIBLE); SetWindowPos(hWnd,HWND_TOPMOST,0,0,GetSystemMetrics(SM_CXSCREEN),GetSystemMetrics(SM_CYSCREEN),SWP_FRAMECHANGED); } else { SetWindowLongPtrA(hWnd,GWL_STYLE,WS_OVERLAPPEDWINDOW|WS_VISIBLE); SetWindowPos(hWnd,HWND_NOTOPMOST,g_SavedRect.left,g_SavedRect.top,g_SavedRect.right-g_SavedRect.left,g_SavedRect.bottom-g_SavedRect.top,SWP_FRAMECHANGED); } InvalidateRect(hWnd, NULL, TRUE); return 0; } if(g_IsConnected && !g_SidebarOpen){ gupt::shared::KeyboardEvent ke={(uint16_t)wp, (msg==WM_KEYDOWN||msg==WM_SYSKEYDOWN)}; PushEv(gupt::shared::SerializeMessage(gupt::shared::MessageType::KeyboardEvent,ke)); } break; }
     case WM_MOUSEWHEEL: { if(g_IsConnected && !g_SidebarOpen){ POINT pt; GetCursorPos(&pt); ScreenToClient(hWnd, &pt); gupt::shared::MouseEvent me={(float)(pt.x-g_DestX)/g_DestW, (float)(pt.y-g_DestY)/g_DestH, 255, false, (int16_t)GET_WHEEL_DELTA_WPARAM(wp)}; PushEv(gupt::shared::SerializeMessage(gupt::shared::MessageType::MouseEvent,me)); } break; }
     case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_LBUTTONUP: case WM_RBUTTONUP: { POINT pt={(short)LOWORD(lp),(short)HIWORD(lp)}; if(PtInRect(&g_TabRect,pt)){ if(msg==WM_LBUTTONDOWN){g_SidebarOpen=!g_SidebarOpen;SetTimer(hWnd,1,10,0);} return 0; } if(g_SidebarOpen){ if(msg==WM_LBUTTONDOWN){ if(PtInRect(&g_CloseBtnRect,pt))PostQuitMessage(0); if(PtInRect(&g_FullscreenBtnRect,pt))SendMessage(hWnd,WM_KEYDOWN,VK_F11,0); RECT cr={g_SidebarX+20, 220, g_WinW-20, 270}; if(PtInRect(&cr,pt)) { g_ClipboardSyncEnabled = !g_ClipboardSyncEnabled; InvalidateRect(hWnd,0,FALSE); } } return 0; } if(g_IsConnected && g_DestW > 0 && g_DestH > 0 && pt.x >= g_DestX && pt.x < g_DestX+g_DestW && pt.y >= g_DestY && pt.y < g_DestY+g_DestH){ gupt::shared::MouseEvent me={(float)(pt.x-g_DestX)/g_DestW, (float)(pt.y-g_DestY)/g_DestH, (uint8_t)((msg==WM_LBUTTONDOWN||msg==WM_LBUTTONUP)?0:1), (bool)(msg==WM_LBUTTONDOWN||msg==WM_RBUTTONDOWN), 0}; PushEv(gupt::shared::SerializeMessage(gupt::shared::MessageType::MouseEvent,me)); } break; }
+    case WM_SETCURSOR: {
+        POINT pt; GetCursorPos(&pt); ScreenToClient(hWnd, &pt);
+        if(g_IsConnected && !g_SidebarOpen && g_DestW > 0 && g_DestH > 0 && 
+           pt.x >= g_DestX && pt.x < g_DestX+g_DestW && pt.y >= g_DestY && pt.y < g_DestY+g_DestH) {
+            SetCursor(NULL);
+            return TRUE;
+        }
+        return DefWindowProc(hWnd, msg, wp, lp);
+    }
     case WM_MOUSEMOVE: { static uint64_t lastMove = 0; uint64_t now = GetTickCount64(); if(now - lastMove < 4) break; lastMove = now; int x=(short)LOWORD(lp),y=(short)HIWORD(lp); if(g_IsConnected && !g_SidebarOpen && g_DestW > 0 && g_DestH > 0 && x>=g_DestX && x<g_DestX+g_DestW && y>=g_DestY && y<g_DestY+g_DestH){ gupt::shared::MouseEvent me={(float)(x-g_DestX)/g_DestW, (float)(y-g_DestY)/g_DestH, 255, (bool)(wp&MK_LBUTTON), 0}; PushEv(gupt::shared::SerializeMessage(gupt::shared::MessageType::MouseEvent,me)); } break; }
     case WM_CLIPBOARDUPDATE: { if(g_IsConnected && OpenClipboard(hWnd)){ HANDLE h=GetClipboardData(CF_UNICODETEXT); if(h){ wchar_t* w=(wchar_t*)GlobalLock(h); if(w){ int n=WideCharToMultiByte(CP_UTF8,0,w,-1,0,0,0,0); if(n>1){ std::string s(n-1,'\0'); WideCharToMultiByte(CP_UTF8,0,w,-1,&s[0],n,0,0); if(g_ClipboardSyncEnabled && s!=g_clientLastFromHost && s!=g_clientLastSent){ g_clientLastSent=s; PushEv(gupt::shared::SerializeClipboardText(s)); } } GlobalUnlock(h); } } CloseClipboard(); } break; }
     case WM_SIZE: { g_WinW=LOWORD(lp); g_WinH=HIWORD(lp); g_SidebarX=g_SidebarOpen?g_WinW-260:g_WinW; if(g_BackDC){ DeleteDC(g_BackDC); g_BackDC=NULL; } if(g_BackBmp){ DeleteObject(g_BackBmp); g_BackBmp=NULL; } InvalidateRect(hWnd, NULL, TRUE); break; }
