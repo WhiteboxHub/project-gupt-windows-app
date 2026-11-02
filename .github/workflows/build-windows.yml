@@ -1,0 +1,26 @@
+name: Build Windows Gupt.exe
+
+on:
+  push:
+    branches: [ feature_gupt, main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -S . -B build
+
+      - name: Build Gupt.exe
+        run: cmake --build build --target Gupt --config Release
+
+      - name: Upload Gupt.exe Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Gupt-Windows-Executable
+          path: build/Release/Gupt.exe
+          if-no-files-found: error
