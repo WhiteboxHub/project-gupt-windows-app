@@ -1,4 +1,4 @@
-/*
+﻿/*
  * Gupt Remote Desktop - Professional Master Build
  * ===============================================
  */
@@ -200,8 +200,21 @@ static WsRelay g_Relay;
 static void PushOutbound(std::vector<uint8_t> f, bool isUrgent) {
     {
         std::lock_guard<std::mutex> lk(g_SendMtx);
-        if(isUrgent || f.size() < 400) g_SendQueue.push_back(std::move(f));
-        else g_PendingFrame = std::move(f);
+        if(isUrgent && f.size() > 400) {
+            // Audio queue cap: max 2 audio packets (~40ms) to prevent video starvation
+            int audioCount = 0;
+            for(auto& q : g_SendQueue) { if(q.size() > 400) audioCount++; }
+            if(audioCount >= 2) {
+                for(auto it = g_SendQueue.begin(); it != g_SendQueue.end(); ++it) {
+                    if(it->size() > 400) { g_SendQueue.erase(it); break; }
+                }
+            }
+            g_SendQueue.push_back(std::move(f));
+        } else if(isUrgent || f.size() < 400) {
+            g_SendQueue.push_back(std::move(f));
+        } else {
+            g_PendingFrame = std::move(f);
+        }
     }
     g_SendCv.notify_one();
 }
@@ -929,10 +942,14 @@ LRESULT CALLBACK ClientWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
                                             g_Relay.Abort();
                                         }
                                     }
-                                    // Auto frame-stall recovery: if no frame received for 5s, request keyframe
+                                    // Auto frame-stall recovery: 3s=keyframe, 6s=hard reconnect
                                     if(g_IsConnected) {
                                         uint64_t lastFrame = g_ClientLastFrameRecvTick.load();
-                                        if(lastFrame > 0 && (GetTickCount64() - lastFrame > 5000)) {
+                                        uint64_t stalledMs = (lastFrame > 0) ? (GetTickCount64() - lastFrame) : 0;
+                                        if(stalledMs >= 6000) {
+                                            g_ClientLastFrameRecvTick = GetTickCount64();
+                                            g_Relay.Abort();
+                                        } else if(stalledMs >= 3000) {
                                             g_ClientLastFrameRecvTick = GetTickCount64();
                                             auto refMsg = gupt::shared::SerializeMessage(gupt::shared::MessageType::RefreshRequest, (uint8_t)1);
                                             if(g_UsingRelay) g_Relay.Send(refMsg.data(), (uint32_t)refMsg.size());
@@ -970,7 +987,7 @@ LRESULT CALLBACK ClientWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
                                             if(aHdr->dataSize > 0 && p.size() >= sizeof(gupt::shared::AudioDataHeader) + aHdr->dataSize) {
                                                 const int16_t* pcm = reinterpret_cast<const int16_t*>(p.data() + sizeof(gupt::shared::AudioDataHeader));
                                                 size_t sampleCount = aHdr->dataSize / sizeof(int16_t);
-                                                g_AudioPlayer.PlaySamples(pcm, sampleCount);
+                                                g_AudioPlayer.PlaySamples(pcm, sampleCount, aHdr->sampleRate, aHdr->channels);
                                             }
                                         }
                                     } else if(msgs[i].first == gupt::shared::MessageType::ClipboardText){ 
@@ -1001,6 +1018,7 @@ LRESULT CALLBACK ClientWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_GUPT_FRAME_ARRIVED: {
         InvalidateRect(hWnd, NULL, FALSE);
+        UpdateWindow(hWnd);
         break;
     }
     case WM_PAINT: {
@@ -1108,7 +1126,7 @@ static void RunClientMode(HINSTANCE hInst) {
         } else if(t==gupt::shared::MessageType::Disconnect) {
             g_IsConnected = false;
             SetWindowTextA(hWnd, "Gupt - Disconnected");
-        } else if(t==gupt::shared::MessageType::FrameData)ProcessFrame(p,hWnd); else if(t==gupt::shared::MessageType::AudioData){ if(p.size() >= sizeof(gupt::shared::AudioDataHeader)) { auto aHdr = reinterpret_cast<const gupt::shared::AudioDataHeader*>(p.data()); if(aHdr->dataSize > 0 && p.size() >= sizeof(gupt::shared::AudioDataHeader) + aHdr->dataSize) { const int16_t* pcm = reinterpret_cast<const int16_t*>(p.data() + sizeof(gupt::shared::AudioDataHeader)); size_t sampleCount = aHdr->dataSize / sizeof(int16_t); g_AudioPlayer.PlaySamples(pcm, sampleCount); } } } else if(t==gupt::shared::MessageType::ClipboardText){ std::string s((char*)p.data(),p.size()); g_clientLastFromHost=s; int wn=MultiByteToWideChar(CP_UTF8,0,s.c_str(),-1,0,0); if(wn>0){ HGLOBAL m=GlobalAlloc(GMEM_MOVEABLE,wn*sizeof(wchar_t)); wchar_t* d=(wchar_t*)GlobalLock(m); MultiByteToWideChar(CP_UTF8,0,s.c_str(),-1,d,wn); GlobalUnlock(m); if(OpenClipboard(NULL)){EmptyClipboard();SetClipboardData(CF_UNICODETEXT,m);CloseClipboard();} } } });
+        } else if(t==gupt::shared::MessageType::FrameData)ProcessFrame(p,hWnd); else if(t==gupt::shared::MessageType::AudioData){ if(p.size() >= sizeof(gupt::shared::AudioDataHeader)) { auto aHdr = reinterpret_cast<const gupt::shared::AudioDataHeader*>(p.data()); if(aHdr->dataSize > 0 && p.size() >= sizeof(gupt::shared::AudioDataHeader) + aHdr->dataSize) { const int16_t* pcm = reinterpret_cast<const int16_t*>(p.data() + sizeof(gupt::shared::AudioDataHeader)); size_t sampleCount = aHdr->dataSize / sizeof(int16_t); g_AudioPlayer.PlaySamples(pcm, sampleCount, aHdr->sampleRate, aHdr->channels); } } } else if(t==gupt::shared::MessageType::ClipboardText){ std::string s((char*)p.data(),p.size()); g_clientLastFromHost=s; int wn=MultiByteToWideChar(CP_UTF8,0,s.c_str(),-1,0,0); if(wn>0){ HGLOBAL m=GlobalAlloc(GMEM_MOVEABLE,wn*sizeof(wchar_t)); wchar_t* d=(wchar_t*)GlobalLock(m); MultiByteToWideChar(CP_UTF8,0,s.c_str(),-1,d,wn); GlobalUnlock(m); if(OpenClipboard(NULL)){EmptyClipboard();SetClipboardData(CF_UNICODETEXT,m);CloseClipboard();} } } });
     
     // Independent Sovereign Heartbeat Thread
     std::thread([](){ while(true){ if(g_IsConnected){ auto hb=gupt::shared::SerializeMessage(gupt::shared::MessageType::Heartbeat,(uint8_t)1); PushEv(std::move(hb)); } Sleep(2000); } }).detach();
