@@ -29,13 +29,12 @@ public:
 
 private:
     void ConvertNv12ToBgra(const uint8_t* nv12Y, const uint8_t* nv12Uv,
-                           uint8_t* bgra, uint32_t width, uint32_t height, uint32_t stride);
+                           uint8_t* bgra, uint32_t width, uint32_t height);
 
     Microsoft::WRL::ComPtr<IMFTransform> m_Decoder;
 
     uint32_t m_Width = 0;
     uint32_t m_Height = 0;
-    uint32_t m_AlignedHeight = 0;
     bool m_OutputsRgb32 = false;
     bool m_Initialized = false;
     std::recursive_mutex m_Mtx;

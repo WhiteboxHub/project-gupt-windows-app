@@ -29,8 +29,7 @@ bool H264Decoder::Initialize(uint32_t width, uint32_t height) {
     Shutdown();
 
     m_Width = (width + 1) & ~1;
-    m_Height = height;
-    m_AlignedHeight = ((height + 15) / 16) * 16;
+    m_Height = (height + 1) & ~1;
 
     // 1. Create H.264 Decoder MFT
     HRESULT hr = CoCreateInstance(CLSID_CMSH264DecoderMFT, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&m_Decoder));
@@ -92,31 +91,28 @@ bool H264Decoder::Initialize(uint32_t width, uint32_t height) {
 }
 
 void H264Decoder::ConvertNv12ToBgra(const uint8_t* nv12Y, const uint8_t* nv12Uv,
-                                    uint8_t* bgra, uint32_t width, uint32_t height, uint32_t stride) {
-    // Fast integer BT.601 NV12 to BGRA color conversion with stride awareness
+                                    uint8_t* bgra, uint32_t width, uint32_t height) {
+    size_t yIndex = 0;
+    size_t bgraIndex = 0;
+
     for (uint32_t y = 0; y < height; ++y) {
-        const uint8_t* yRow = nv12Y + (y * stride);
-        const uint8_t* uvRow = nv12Uv + ((y >> 1) * stride);
-        uint8_t* dstRow = bgra + (y * width * 4);
-
+        size_t uvRowOffset = (y >> 1) * width;
         for (uint32_t x = 0; x < width; ++x) {
-            int Y = static_cast<int>(yRow[x]) - 16;
-            if (Y < 0) Y = 0;
+            int Y = static_cast<int>(nv12Y[yIndex++]);
 
-            size_t uvIdx = (x & ~1);
-            int U = static_cast<int>(uvRow[uvIdx]) - 128;
-            int V = static_cast<int>(uvRow[uvIdx + 1]) - 128;
+            size_t uvIdx = uvRowOffset + (x & ~1);
+            int U = static_cast<int>(nv12Uv[uvIdx]) - 128;
+            int V = static_cast<int>(nv12Uv[uvIdx + 1]) - 128;
 
-            int C = 298 * Y;
-            int r = (C + 409 * V + 128) >> 8;
-            int g = (C - 100 * U - 208 * V + 128) >> 8;
-            int b = (C + 516 * U + 128) >> 8;
+            // Full-range BT.709 YUV -> RGB
+            int r = Y + ((403 * V) >> 8);
+            int g = Y - ((48 * U + 120 * V) >> 8);
+            int b = Y + ((475 * U) >> 8);
 
-            dstRow[0] = static_cast<uint8_t>(b < 0 ? 0 : (b > 255 ? 255 : b));
-            dstRow[1] = static_cast<uint8_t>(g < 0 ? 0 : (g > 255 ? 255 : g));
-            dstRow[2] = static_cast<uint8_t>(r < 0 ? 0 : (r > 255 ? 255 : r));
-            dstRow[3] = 0xFF; // Alpha
-            dstRow += 4;
+            bgra[bgraIndex++] = static_cast<uint8_t>(b < 0 ? 0 : (b > 255 ? 255 : b));
+            bgra[bgraIndex++] = static_cast<uint8_t>(g < 0 ? 0 : (g > 255 ? 255 : g));
+            bgra[bgraIndex++] = static_cast<uint8_t>(r < 0 ? 0 : (r > 255 ? 255 : r));
+            bgra[bgraIndex++] = 0xFF; // Alpha
         }
     }
 }
@@ -154,7 +150,7 @@ bool H264Decoder::DecodeNal(const uint8_t* nalData, size_t nalSize,
     if (FAILED(MFCreateSample(&outSample))) return false;
 
     Microsoft::WRL::ComPtr<IMFMediaBuffer> outBuffer;
-    DWORD bufSize = (streamInfo.cbSize > 0) ? streamInfo.cbSize : (m_Width * (m_AlignedHeight > 0 ? m_AlignedHeight : m_Height) * 4);
+    DWORD bufSize = (streamInfo.cbSize > 0) ? streamInfo.cbSize : (m_Width * m_Height * 4);
     if (FAILED(MFCreateMemoryBuffer(bufSize, &outBuffer))) return false;
     outSample->AddBuffer(outBuffer.Get());
 
@@ -179,40 +175,19 @@ bool H264Decoder::DecodeNal(const uint8_t* nalData, size_t nalSize,
 
     IMFMediaBuffer* pContigBuffer = NULL;
     if (SUCCEEDED(outSample->ConvertToContiguousBuffer(&pContigBuffer)) && pContigBuffer) {
-        Microsoft::WRL::ComPtr<IMF2DBuffer> p2D;
         BYTE* pDecoded = NULL;
-        LONG pitch = 0;
-        bool locked2D = false;
-
-        if (SUCCEEDED(pContigBuffer->QueryInterface(IID_PPV_ARGS(&p2D))) && p2D) {
-            if (SUCCEEDED(p2D->Lock2D(&pDecoded, &pitch)) && pDecoded) {
-                locked2D = true;
-            }
-        }
-
         DWORD decodedLen = 0;
-        if (!locked2D) {
-            pContigBuffer->Lock(&pDecoded, NULL, &decodedLen);
-            pitch = m_Width;
-        }
-
-        if (pDecoded) {
+        if (SUCCEEDED(pContigBuffer->Lock(&pDecoded, NULL, &decodedLen)) && pDecoded && decodedLen > 0) {
             outW = m_Width;
             outH = m_Height;
             size_t targetBgraBytes = (size_t)m_Width * m_Height * 4;
             outBgraPixels.resize(targetBgraBytes);
 
-            uint32_t stride = (pitch > 0) ? static_cast<uint32_t>(pitch) : m_Width;
-            uint32_t alignH = (m_AlignedHeight > 0) ? m_AlignedHeight : ((m_Height + 15) / 16) * 16;
             const uint8_t* pY = pDecoded;
-            const uint8_t* pUv = pY + ((size_t)stride * alignH);
-            ConvertNv12ToBgra(pY, pUv, outBgraPixels.data(), m_Width, m_Height, stride);
+            const uint8_t* pUv = pY + ((size_t)m_Width * m_Height);
+            ConvertNv12ToBgra(pY, pUv, outBgraPixels.data(), m_Width, m_Height);
 
-            if (locked2D) {
-                p2D->Unlock2D();
-            } else {
-                pContigBuffer->Unlock();
-            }
+            pContigBuffer->Unlock();
         }
         pContigBuffer->Release();
     }

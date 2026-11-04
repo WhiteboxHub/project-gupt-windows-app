@@ -43,7 +43,6 @@ private:
 
     uint32_t m_Width = 0;
     uint32_t m_Height = 0;
-    uint32_t m_AlignedHeight = 0;
     uint32_t m_Fps = 60;
     uint32_t m_Bitrate = 2500000;
     uint64_t m_FrameIndex = 0;
