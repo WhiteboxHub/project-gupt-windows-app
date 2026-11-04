@@ -13,6 +13,7 @@ public:
     ~InputInjector();
 
     void Initialize();
+    void SetScreenDimensions(int width, int height);
     void IngestKeyboardEvent(const gupt::shared::KeyboardEvent& ev);
     void IngestMouseEvent(const gupt::shared::MouseEvent& ev);
 

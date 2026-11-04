@@ -79,6 +79,7 @@ server.on('upgrade', (request, socket, head) => {
 // --- Relay WebSocket: transparent binary proxy between host and client ---
 relayWss.on('connection', (ws, req) => {
     ws.isAlive = true;
+    ws.missedPings = 0;
     ws.on('pong', heartbeat);
 
     const parsedUrl = url.parse(req.url, true);
@@ -97,24 +98,33 @@ relayWss.on('connection', (ws, req) => {
     const relay = relaySessions.get(session);
 
     if (role === 'host') {
+        if (relay.hostWs && relay.hostWs !== ws) {
+            try { relay.hostWs.terminate(); } catch (e) {}
+        }
         relay.hostWs = ws;
         ws.on('message', (data) => {
             if (relay.clientWs && relay.clientWs.readyState === WebSocket.OPEN) {
+                // Backpressure: drop video frames (type 3) if client buffer exceeds 1.5MB to prevent memory exhaustion
+                if (relay.clientWs.bufferedAmount > 1536 * 1024 && data.length > 0 && data[0] === 3) {
+                    return;
+                }
                 relay.clientWs.send(data, { binary: true });
             }
         });
         ws.on('close', () => {
             if (relaySessions.has(session)) {
-                relaySessions.get(session).hostWs = null;
+                const s = relaySessions.get(session);
+                if (s.hostWs === ws) {
+                    s.hostWs = null;
+                }
             }
             console.log(`[RELAY HOST DISCONNECT] Session: ${session}`);
         });
     } else if (role === 'client') {
-        relay.clientWs = ws;
-        // Notify host that client joined via relay
-        if (relay.hostWs && relay.hostWs.readyState === WebSocket.OPEN) {
-            relay.hostWs.send(JSON.stringify({ type: 'client_relay_connected' }));
+        if (relay.clientWs && relay.clientWs !== ws) {
+            try { relay.clientWs.terminate(); } catch (e) {}
         }
+        relay.clientWs = ws;
         ws.on('message', (data) => {
             if (relay.hostWs && relay.hostWs.readyState === WebSocket.OPEN) {
                 relay.hostWs.send(data, { binary: true });
@@ -122,7 +132,10 @@ relayWss.on('connection', (ws, req) => {
         });
         ws.on('close', () => {
             if (relaySessions.has(session)) {
-                relaySessions.get(session).clientWs = null;
+                const s = relaySessions.get(session);
+                if (s.clientWs === ws) {
+                    s.clientWs = null;
+                }
             }
             console.log(`[RELAY CLIENT DISCONNECT] Session: ${session}`);
         });
@@ -130,10 +143,14 @@ relayWss.on('connection', (ws, req) => {
 });
 
 // --- Signaling WebSocket: session handshake (existing logic) ---
-function heartbeat() { this.isAlive = true; }
+function heartbeat() {
+    this.isAlive = true;
+    this.missedPings = 0;
+}
 
 signalingWss.on('connection', (ws, req) => {
     ws.isAlive = true;
+    ws.missedPings = 0;
     ws.on('pong', heartbeat);
 
     const forwarded = req.headers['x-forwarded-for'];
@@ -202,8 +219,8 @@ signalingWss.on('connection', (ws, req) => {
 
 function pingClients(wss) {
     wss.clients.forEach((ws) => {
-        if (ws.isAlive === false) return ws.terminate();
-        ws.isAlive = false;
+        ws.missedPings = (ws.missedPings || 0) + 1;
+        if (ws.missedPings > 2) return ws.terminate();
         ws.ping();
     });
 }
@@ -211,7 +228,7 @@ function pingClients(wss) {
 const interval = setInterval(() => {
     pingClients(signalingWss);
     pingClients(relayWss);
-}, 30000);
+}, 25000);
 
 signalingWss.on('close', () => clearInterval(interval));
 relayWss.on('close', () => clearInterval(interval));

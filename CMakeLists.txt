@@ -13,7 +13,7 @@ endif()
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # Group core dependencies
-set(WINDOWS_LIBS d3d11 dxgi ws2_32 user32 gdi32 msimg32 windowscodecs shlwapi comctl32 winhttp)
+set(WINDOWS_LIBS d3d11 dxgi ws2_32 user32 gdi32 msimg32 windowscodecs shlwapi comctl32 winhttp winmm ole32)
 
 # Include directories
 set(CORE_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR})
@@ -31,11 +31,18 @@ add_executable(Gupt WIN32
     Core/Input/InputInjector.cpp
     Core/Network/TcpNetwork.h
     Core/Network/TcpNetwork.cpp
+    Core/Audio/AudioCapturer.h
+    Core/Audio/AudioCapturer.cpp
+    Core/Audio/AudioPlayer.h
+    Core/Audio/AudioPlayer.cpp
     resources.rc
 )
 target_include_directories(Gupt PRIVATE ${CORE_INCLUDES})
 target_link_libraries(Gupt PRIVATE ${WINDOWS_LIBS})
 set_property(TARGET Gupt PROPERTY FOLDER "Applications")
+set_target_properties(Gupt PROPERTIES
+    LINK_FLAGS "/MANIFESTUAC:\"level='asInvoker' uiAccess='false'\""
+)
 
 # ════════════════════════════════════════════════════════
 #   Legacy split executables (kept for development only)
@@ -56,6 +63,9 @@ add_executable(HostAgent
 target_include_directories(HostAgent PRIVATE ${CORE_INCLUDES})
 target_link_libraries(HostAgent PRIVATE ${WINDOWS_LIBS})
 set_property(TARGET HostAgent PROPERTY FOLDER "Applications")
+set_target_properties(HostAgent PROPERTIES
+    LINK_FLAGS "/MANIFESTUAC:\"level='asInvoker' uiAccess='false'\""
+)
 
 # ==== Add Client Viewer ====
 add_executable(ClientViewer WIN32
@@ -68,6 +78,9 @@ add_executable(ClientViewer WIN32
 target_include_directories(ClientViewer PRIVATE ${CORE_INCLUDES})
 target_link_libraries(ClientViewer PRIVATE ${WINDOWS_LIBS})
 set_property(TARGET ClientViewer PROPERTY FOLDER "Applications")
+set_target_properties(ClientViewer PROPERTIES
+    LINK_FLAGS "/MANIFESTUAC:\"level='asInvoker' uiAccess='false'\""
+)
 
 # Primary startup project is now the unified launcher
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT Gupt)
