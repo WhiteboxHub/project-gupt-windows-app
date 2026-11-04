@@ -1,4 +1,4 @@
-﻿/*
+/*
  * Gupt Remote Desktop - Professional Master Build
  * ===============================================
  */
@@ -24,6 +24,8 @@
 #include "Core/Capture/ScreenCapturer.h"
 #include "Core/Audio/AudioCapturer.h"
 #include "Core/Audio/AudioPlayer.h"
+#include "Core/Video/H264Encoder.h"
+#include "Core/Video/H264Decoder.h"
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "shlwapi.lib")
@@ -315,17 +317,44 @@ static void HostEncoderLoop(gupt::core::capture::ScreenCapturer* capturer) {
                 g_ForceFullScan = false;
             }
 
-            std::vector<uint8_t> jpg;
-            // High-fidelity quality 85 with 4:4:4 chroma subsampling: razor-sharp text & video, zero blur
-            int quality = isFullScan ? 82 : 86;
-            if(capturer->CaptureRegionJpeg(raw, w, h, targetX, targetY, targetW, targetH, jpg, quality, true)){
-                uint32_t fn = ++s_frameCounter;
-                g_HostLastSentFrameNum = fn;
-                g_HostLastFrameSendTick = GetTickCount64();
-                gupt::shared::FrameDataHeader fHdr = {
-                    fn, w, h, targetW, targetH, targetX, targetY, 32, !isFullScan, now
-                };
-                PushOutbound(gupt::shared::SerializeFrame(fHdr, jpg), false);
+            static gupt::core::video::H264Encoder s_h264Encoder;
+            if(!s_h264Encoder.IsInitialized() || s_h264Encoder.GetWidth() != w || s_h264Encoder.GetHeight() != h) {
+                s_h264Encoder.Initialize(w, h, 60, 2500000);
+            }
+
+            bool encodedH264 = false;
+            if(s_h264Encoder.IsInitialized()) {
+                std::vector<uint8_t> nalData;
+                bool isKeyframe = isFullScan || g_ForceFullScan;
+                if(s_h264Encoder.EncodeBgraFrame(raw.data(), w, h, nalData, isKeyframe)) {
+                    if(isKeyframe) {
+                        s_lastFullScanTick = now;
+                        g_ForceFullScan = false;
+                    }
+                    uint32_t fn = ++s_frameCounter;
+                    g_HostLastSentFrameNum = fn;
+                    g_HostLastFrameSendTick = GetTickCount64();
+                    gupt::shared::FrameDataHeader fHdr = {
+                        fn, w, h, w, h, 0, 0, 264, !isKeyframe, now
+                    };
+                    PushOutbound(gupt::shared::SerializeFrame(fHdr, nalData), false);
+                    encodedH264 = true;
+                }
+            }
+
+            // Graceful fallback to JPEG if hardware encoder is unavailable
+            if(!encodedH264) {
+                std::vector<uint8_t> jpg;
+                int quality = isFullScan ? 82 : 86;
+                if(capturer->CaptureRegionJpeg(raw, w, h, targetX, targetY, targetW, targetH, jpg, quality, true)){
+                    uint32_t fn = ++s_frameCounter;
+                    g_HostLastSentFrameNum = fn;
+                    g_HostLastFrameSendTick = GetTickCount64();
+                    gupt::shared::FrameDataHeader fHdr = {
+                        fn, w, h, targetW, targetH, targetX, targetY, 32, !isFullScan, now
+                    };
+                    PushOutbound(gupt::shared::SerializeFrame(fHdr, jpg), false);
+                }
             }
         }
     }
@@ -672,11 +701,17 @@ static void RunHostMode() {
     std::thread([&capturer, &injector]() {
         while(true) {
             if(g_SessionActive) {
-                // Sender-paced flow control: if client is 2+ frames behind, pace to prevent bufferbloat
+                // Self-healing sender-paced flow control: paces up to 60ms, then advances ack to prevent deadlock
                 uint32_t inFlight = g_HostLastSentFrameNum.load() - g_HostLastAckedFrameNum.load();
-                if(inFlight >= 2 && (GetTickCount64() - g_HostLastFrameSendTick.load() < 80)) {
-                    Sleep(10);
-                    continue;
+                if(inFlight >= 2) {
+                    uint64_t diff = GetTickCount64() - g_HostLastFrameSendTick.load();
+                    if(diff < 60) {
+                        Sleep(8);
+                        continue;
+                    } else {
+                        // Advance ack to keep live stream fluid if client dropped a packet
+                        g_HostLastAckedFrameNum = g_HostLastSentFrameNum.load() - 1;
+                    }
                 }
                 uint64_t loopStart = GetTickCount64();
                 std::vector<uint8_t> raw; uint32_t w, h;
@@ -711,10 +746,39 @@ static void RunHostMode() {
 void ProcessFrame(const std::vector<uint8_t>& p, HWND hWnd) {
     if(p.size() < sizeof(gupt::shared::FrameDataHeader)) return;
     gupt::shared::FrameDataHeader* hdr = (gupt::shared::FrameDataHeader*)p.data();
-    uint32_t jpegSize = (UINT)(p.size() - sizeof(gupt::shared::FrameDataHeader));
-    if(jpegSize == 0) return;
+    uint32_t payloadSize = (UINT)(p.size() - sizeof(gupt::shared::FrameDataHeader));
+    if(payloadSize == 0) return;
 
-    IStream* stream = SHCreateMemStream(p.data() + sizeof(gupt::shared::FrameDataHeader), jpegSize);
+    // Fast-path Hardware H.264 Decoding
+    if(hdr->bpp == 264) {
+        static gupt::core::video::H264Decoder s_h264Decoder;
+        if(!s_h264Decoder.IsInitialized()) {
+            s_h264Decoder.Initialize(hdr->totalWidth, hdr->totalHeight);
+        }
+        std::vector<uint8_t> bgra;
+        uint32_t decW = 0, decH = 0;
+        if(s_h264Decoder.DecodeNal(p.data() + sizeof(gupt::shared::FrameDataHeader), payloadSize, bgra, decW, decH)) {
+            {
+                std::lock_guard<std::mutex> lk(g_FrameMutex);
+                g_FrameW = decW;
+                g_FrameH = decH;
+                g_LatestFrame = std::move(bgra);
+            }
+            if(hWnd && g_LastRefreshTime > 0 && GetTickCount64() - g_LastRefreshTime < 4000){
+                SetWindowTextA(hWnd, g_UsingRelay ? "Gupt - Connected (Relay)" : "Gupt - Connected (LAN)");
+            }
+            if(hWnd) PostMessage(hWnd, WM_GUPT_FRAME_ARRIVED, 0, 0);
+            g_ClientLastFrameRecvTick = GetTickCount64();
+
+            gupt::shared::FrameAck ack = { hdr->frameNumber };
+            auto ackMsg = gupt::shared::SerializeMessage(gupt::shared::MessageType::FrameAck, ack);
+            if(g_UsingRelay) g_Relay.Send(ackMsg.data(), (uint32_t)ackMsg.size());
+            else g_Client.SendRaw(ackMsg);
+        }
+        return;
+    }
+
+    IStream* stream = SHCreateMemStream(p.data() + sizeof(gupt::shared::FrameDataHeader), payloadSize);
     if(!stream) return;
 
     static thread_local IWICImagingFactory* s_clientWicFactory = NULL;
