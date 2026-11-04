@@ -48,14 +48,18 @@ bool H264Encoder::Initialize(uint32_t width, uint32_t height, uint32_t fps, uint
     std::lock_guard<std::recursive_mutex> lk(m_Mtx);
     Shutdown();
 
-    // Width and height must be even for NV12
+    // Width and height must be aligned to 16 for H.264 macroblocks (e.g. 1080 -> 1088)
     m_Width = (width + 1) & ~1;
-    m_Height = (height + 1) & ~1;
+    m_Height = height;
+    m_AlignedHeight = ((height + 15) / 16) * 16;
     m_Fps = (fps > 0) ? fps : 60;
     m_Bitrate = (bitrateBps > 0) ? bitrateBps : 2500000;
 
-    size_t nv12Size = (size_t)m_Width * m_Height * 3 / 2;
-    m_Nv12Buffer.resize(nv12Size);
+    size_t nv12Size = (size_t)m_Width * m_AlignedHeight * 3 / 2;
+    m_Nv12Buffer.assign(nv12Size, 0);
+    // Initialize Y with 16 (Y black) and UV with 128 (neutral chroma black)
+    memset(m_Nv12Buffer.data(), 16, (size_t)m_Width * m_AlignedHeight);
+    memset(m_Nv12Buffer.data() + ((size_t)m_Width * m_AlignedHeight), 128, (size_t)m_Width * m_AlignedHeight / 2);
 
     HRESULT hr = CoCreateInstance(CLSID_CMSH264EncoderMFT, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&m_Encoder));
     if (FAILED(hr) || !m_Encoder) {
@@ -182,7 +186,7 @@ bool H264Encoder::EncodeBgraFrame(const uint8_t* bgra, uint32_t width, uint32_t 
 
     // 1. Convert BGRA to NV12
     uint8_t* pY = m_Nv12Buffer.data();
-    uint8_t* pUv = pY + ((size_t)m_Width * m_Height);
+    uint8_t* pUv = pY + ((size_t)m_Width * m_AlignedHeight);
     ConvertBgraToNv12(bgra, pY, pUv, m_Width, m_Height);
 
     // 2. Wrap NV12 buffer into IMFMediaBuffer and IMFSample
