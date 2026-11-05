@@ -1,5 +1,6 @@
 #include "H264Decoder.h"
 #include <wmcodecdsp.h>
+#include <iostream>
 
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfuuid.lib")
@@ -91,23 +92,25 @@ bool H264Decoder::Initialize(uint32_t width, uint32_t height) {
 }
 
 void H264Decoder::ConvertNv12ToBgra(const uint8_t* nv12Y, const uint8_t* nv12Uv,
-                                    uint8_t* bgra, uint32_t width, uint32_t height) {
-    size_t yIndex = 0;
+                                    uint8_t* bgra, uint32_t width, uint32_t height, uint32_t stride) {
+    if (stride < width) stride = width;
     size_t bgraIndex = 0;
 
     for (uint32_t y = 0; y < height; ++y) {
-        size_t uvRowOffset = (y >> 1) * width;
+        const uint8_t* yRow = nv12Y + (y * (size_t)stride);
+        const uint8_t* uvRow = nv12Uv + ((y >> 1) * (size_t)stride);
+
         for (uint32_t x = 0; x < width; ++x) {
-            int Y = static_cast<int>(nv12Y[yIndex++]);
+            // BT.709 Limited Range -> Full Range RGB
+            int Ylim = static_cast<int>(yRow[x]) - 16;
+            size_t uvIdx = (x & ~1);
+            int U = static_cast<int>(uvRow[uvIdx])     - 128;  // Cb
+            int V = static_cast<int>(uvRow[uvIdx + 1]) - 128;  // Cr
 
-            size_t uvIdx = uvRowOffset + (x & ~1);
-            int U = static_cast<int>(nv12Uv[uvIdx]) - 128;
-            int V = static_cast<int>(nv12Uv[uvIdx + 1]) - 128;
-
-            // Full-range BT.709 YUV -> RGB
-            int r = Y + ((403 * V) >> 8);
-            int g = Y - ((48 * U + 120 * V) >> 8);
-            int b = Y + ((475 * U) >> 8);
+            int C = 298 * Ylim + 128;
+            int r = (C + 459 * V)           >> 8;
+            int g = (C - 55  * U - 136 * V) >> 8;
+            int b = (C + 541 * U)           >> 8;
 
             bgra[bgraIndex++] = static_cast<uint8_t>(b < 0 ? 0 : (b > 255 ? 255 : b));
             bgra[bgraIndex++] = static_cast<uint8_t>(g < 0 ? 0 : (g > 255 ? 255 : g));
@@ -162,6 +165,15 @@ bool H264Decoder::DecodeNal(const uint8_t* nalData, size_t nalSize,
     if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
         Microsoft::WRL::ComPtr<IMFMediaType> newType;
         if (SUCCEEDED(m_Decoder->GetOutputAvailableType(0, 0, &newType))) {
+            UINT32 w = 0, h = 0, stride = 0;
+            MFGetAttributeSize(newType.Get(), MF_MT_FRAME_SIZE, &w, &h);
+            newType->GetUINT32(MF_MT_DEFAULT_STRIDE, &stride);
+            GUID subtype = {0};
+            newType->GetGUID(MF_MT_SUBTYPE, &subtype);
+            std::cout << "\n[STREAM CHANGE] newType FrameSize=" << w << "x" << h 
+                      << " Stride=" << stride 
+                      << " isNV12=" << (subtype == MFVideoFormat_NV12)
+                      << " isRGB32=" << (subtype == MFVideoFormat_RGB32) << "\n";
             m_Decoder->SetOutputType(0, newType.Get(), 0);
         }
         hr = m_Decoder->ProcessOutput(0, 1, &outputData, &status);
@@ -183,9 +195,20 @@ bool H264Decoder::DecodeNal(const uint8_t* nalData, size_t nalSize,
             size_t targetBgraBytes = (size_t)m_Width * m_Height * 4;
             outBgraPixels.resize(targetBgraBytes);
 
+            // H.264 macroblock dimensions are 16x16. Decoders pad width and height to multiples of 16.
+            // E.g. for 1600x900 -> 1600x912, for 1920x1080 -> 1920x1088, for 1366x768 -> 1376x768.
+            uint32_t paddedW = (m_Width + 15) & ~15;
+            uint32_t paddedH = (m_Height + 15) & ~15;
+
+            uint32_t stride = m_Width;
+            if (decodedLen >= (size_t)paddedW * paddedH * 3 / 2) {
+                stride = paddedW;
+            }
+
+            uint32_t decHeight = (decodedLen >= (size_t)stride * paddedH * 3 / 2) ? paddedH : m_Height;
             const uint8_t* pY = pDecoded;
-            const uint8_t* pUv = pY + ((size_t)m_Width * m_Height);
-            ConvertNv12ToBgra(pY, pUv, outBgraPixels.data(), m_Width, m_Height);
+            const uint8_t* pUv = pY + ((size_t)stride * decHeight);
+            ConvertNv12ToBgra(pY, pUv, outBgraPixels.data(), m_Width, m_Height, stride);
 
             pContigBuffer->Unlock();
         }

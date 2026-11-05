@@ -169,14 +169,16 @@ void AudioCapturer::CaptureLoop() {
                         } else if (srcChannels == 2) {
                             left = frame[0]; right = frame[1];
                         } else if (srcChannels >= 6) {
-                            // 5.1/7.1 downmix: L/R + Center*0.707 + Surround*0.707
-                            left  = frame[0] + 0.707f * frame[2] + 0.707f * frame[4];
-                            right = frame[1] + 0.707f * frame[2] + 0.707f * frame[5];
+                            // Normalized ITU-R BS.775 5.1/7.1 downmix: prevent clipping distortion
+                            float center = frame[2] * 0.707f;
+                            left  = (frame[0] + center + frame[4] * 0.707f) * 0.5f;
+                            right = (frame[1] + center + frame[5] * 0.707f) * 0.5f;
                         } else {
-                            left = frame[0]; right = frame[1];
+                            left = frame[0]; right = (srcChannels > 1) ? frame[1] : frame[0];
                         }
-                        if (left > 1.0f) left = 1.0f; else if (left < -1.0f) left = -1.0f;
-                        if (right > 1.0f) right = 1.0f; else if (right < -1.0f) right = -1.0f;
+                        // Smooth soft-limiting to eliminate digital clipping buzz/distortion
+                        if (left > 1.0f) left = 1.0f - expf(-left); else if (left < -1.0f) left = -1.0f + expf(left);
+                        if (right > 1.0f) right = 1.0f - expf(-right); else if (right < -1.0f) right = -1.0f + expf(right);
 
                         if (std::abs(left) > 0.0005f || std::abs(right) > 0.0005f) {
                             hasAudioSignal = true;

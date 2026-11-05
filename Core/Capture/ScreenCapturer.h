@@ -27,9 +27,13 @@ public:
     bool CaptureNextFrameJpeg(std::vector<uint8_t>& outJpeg, uint32_t& outWidth, uint32_t& outHeight, int quality);
     bool CaptureRegionJpeg(const std::vector<uint8_t>& rawPixels, uint32_t fullWidth, uint32_t fullHeight, uint32_t x, uint32_t y, uint32_t w, uint32_t h, std::vector<uint8_t>& outJpeg, int quality, bool force444 = false);
     void ReleaseFrame();
+    void SetDrawCursor(bool enable) { m_DrawCursor = enable; }
+    bool GetDrawCursor() const { return m_DrawCursor; }
 
 private:
     void CleanupGdi();
+
+    bool m_DrawCursor = false; // False by default: client renders zero-latency local cursor (Chrome Remote Desktop standard)
 
     ComPtr<ID3D11Device> m_Device;
     ComPtr<ID3D11DeviceContext> m_DeviceContext;

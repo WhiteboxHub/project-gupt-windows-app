@@ -254,7 +254,7 @@ bool ScreenCapturer::CaptureNextFrame(std::vector<uint8_t>& outPixels, uint32_t&
                 outHeight = gh;
                 m_LastDirtyBounds = { 0, 0, static_cast<LONG>(outWidth), static_cast<LONG>(outHeight) };
                 m_HasLastDirtyBounds = true;
-                DrawCursorOntoFrame(outPixels, outWidth, outHeight, m_LastDirtyBounds, m_HasLastDirtyBounds);
+                if (m_DrawCursor) { DrawCursorOntoFrame(outPixels, outWidth, outHeight, m_LastDirtyBounds, m_HasLastDirtyBounds); }
                 return true;
             }
         }
@@ -271,7 +271,7 @@ bool ScreenCapturer::CaptureNextFrame(std::vector<uint8_t>& outPixels, uint32_t&
         GetCursorPos(&curPt);
         bool cursorMoved = (curPt.x != m_LastCursorPos.x || curPt.y != m_LastCursorPos.y);
 
-        if (cursorMoved && !m_CachedFrame.empty() && m_Width > 0 && m_Height > 0) {
+        if (m_DrawCursor && cursorMoved && !m_CachedFrame.empty() && m_Width > 0 && m_Height > 0) {
             m_LastCursorPos = curPt;
             m_LastForceCaptureTick = now;
             outWidth = m_Width;
@@ -279,7 +279,7 @@ bool ScreenCapturer::CaptureNextFrame(std::vector<uint8_t>& outPixels, uint32_t&
             outPixels = m_CachedFrame;
             m_HasLastDirtyBounds = true;
             m_LastDirtyBounds = { 0, 0, static_cast<LONG>(outWidth), static_cast<LONG>(outHeight) };
-            DrawCursorOntoFrame(outPixels, outWidth, outHeight, m_LastDirtyBounds, m_HasLastDirtyBounds);
+            if (m_DrawCursor) { DrawCursorOntoFrame(outPixels, outWidth, outHeight, m_LastDirtyBounds, m_HasLastDirtyBounds); }
             return true;
         }
 
@@ -291,7 +291,7 @@ bool ScreenCapturer::CaptureNextFrame(std::vector<uint8_t>& outPixels, uint32_t&
             outPixels = m_CachedFrame;
             m_HasLastDirtyBounds = true;
             m_LastDirtyBounds = { 0, 0, static_cast<LONG>(outWidth), static_cast<LONG>(outHeight) };
-            DrawCursorOntoFrame(outPixels, outWidth, outHeight, m_LastDirtyBounds, m_HasLastDirtyBounds);
+            if (m_DrawCursor) { DrawCursorOntoFrame(outPixels, outWidth, outHeight, m_LastDirtyBounds, m_HasLastDirtyBounds); }
             return true;
         }
 
@@ -387,7 +387,7 @@ bool ScreenCapturer::CaptureNextFrame(std::vector<uint8_t>& outPixels, uint32_t&
     m_Height = outHeight;
     m_LastForceCaptureTick = GetTickCount64();
 
-    DrawCursorOntoFrame(outPixels, outWidth, outHeight, m_LastDirtyBounds, m_HasLastDirtyBounds);
+    if (m_DrawCursor) { DrawCursorOntoFrame(outPixels, outWidth, outHeight, m_LastDirtyBounds, m_HasLastDirtyBounds); }
 
     return true;
 }

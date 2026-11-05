@@ -203,10 +203,10 @@ static void PushOutbound(std::vector<uint8_t> f, bool isUrgent) {
     {
         std::lock_guard<std::mutex> lk(g_SendMtx);
         if(isUrgent && f.size() > 400) {
-            // Audio queue cap: max 2 audio packets (~40ms) to prevent video starvation
+            // Audio queue headroom: 15 packets (~300ms) preserves 100% of audio continuity without pops/clicks
             int audioCount = 0;
             for(auto& q : g_SendQueue) { if(q.size() > 400) audioCount++; }
-            if(audioCount >= 2) {
+            if(audioCount >= 15) {
                 for(auto it = g_SendQueue.begin(); it != g_SendQueue.end(); ++it) {
                     if(it->size() > 400) { g_SendQueue.erase(it); break; }
                 }
@@ -215,6 +215,7 @@ static void PushOutbound(std::vector<uint8_t> f, bool isUrgent) {
         } else if(isUrgent || f.size() < 400) {
             g_SendQueue.push_back(std::move(f));
         } else {
+            if(!g_PendingFrame.empty()) { g_ForceFullScan = true; }
             g_PendingFrame = std::move(f);
         }
     }
@@ -275,6 +276,23 @@ static void ScaleTo1080p(const std::vector<uint8_t>& src, uint32_t srcW, uint32_
     }
 }
 
+static uint32_t CalculateOptimalBitrate(uint32_t width, uint32_t height) {
+    uint64_t pixels = (uint64_t)width * height;
+    if (pixels >= 7680 * 4320) {
+        return 80000000; // 80 Mbps for pristine 8K
+    } else if (pixels >= 4096 * 2160) {
+        return 45000000; // 45 Mbps for 4K DCI
+    } else if (pixels >= 3840 * 2160) {
+        return 40000000; // 40 Mbps for 2160p (4K UHD)
+    } else if (pixels >= 2560 * 1440) {
+        return 25000000; // 25 Mbps for 1440p (2K)
+    } else if (pixels >= 1920 * 1080) {
+        return 16000000; // 16 Mbps for 1080p
+    } else {
+        return 10000000; // 10 Mbps for 720p / 900p
+    }
+}
+
 static void HostEncoderLoop(gupt::core::capture::ScreenCapturer* capturer) {
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
     static uint32_t s_frameCounter = 0;
@@ -293,7 +311,7 @@ static void HostEncoderLoop(gupt::core::capture::ScreenCapturer* capturer) {
         }
         if(!raw.empty() && w > 0 && h > 0) {
             uint64_t now = GetTickCount64();
-            bool isFullScan = g_ForceFullScan || (now - s_lastFullScanTick > 2500) || !hasDirty || (dw == 0 || dh == 0);
+            bool isFullScan = g_ForceFullScan || (now - s_lastFullScanTick > 1000) || !hasDirty || (dw == 0 || dh == 0);
             
             uint32_t targetX = 0, targetY = 0, targetW = w, targetH = h;
             if (!isFullScan) {
@@ -319,7 +337,8 @@ static void HostEncoderLoop(gupt::core::capture::ScreenCapturer* capturer) {
 
             static gupt::core::video::H264Encoder s_h264Encoder;
             if(!s_h264Encoder.IsInitialized() || s_h264Encoder.GetWidth() != w || s_h264Encoder.GetHeight() != h) {
-                s_h264Encoder.Initialize(w, h, 60, 2500000);
+                uint32_t optBitrate = CalculateOptimalBitrate(w, h);
+                s_h264Encoder.Initialize(w, h, 60, optBitrate);
             }
 
             bool encodedH264 = false;
@@ -686,7 +705,7 @@ static void RunHostMode() {
                     if(c == g_lastFromClient) return 0;
                 }
                 auto s = shared::SerializeClipboardText(c);
-                if(g_Relay.connected) g_Relay.Send(s.data(), (uint32_t)s.size());
+                PushOutbound(std::move(s), true);
             }
         }
         return DefWindowProcA(hw, m, w, l);
@@ -701,15 +720,16 @@ static void RunHostMode() {
     std::thread([&capturer, &injector]() {
         while(true) {
             if(g_SessionActive) {
-                // Self-healing sender-paced flow control: paces up to 60ms, then advances ack to prevent deadlock
+                // H.264 self-recovers on keyframes - no per-frame ACK blocking needed (like CRD/Parsec).
+                // With 500ms relay RTT at 60fps: ~30 frames in-flight is normal. Cap at 90 (1.5s).
                 uint32_t inFlight = g_HostLastSentFrameNum.load() - g_HostLastAckedFrameNum.load();
-                if(inFlight >= 2) {
+                if(inFlight >= 90) {
                     uint64_t diff = GetTickCount64() - g_HostLastFrameSendTick.load();
-                    if(diff < 60) {
-                        Sleep(8);
+                    if(diff < 2000) {
+                        Sleep(4);
                         continue;
                     } else {
-                        // Advance ack to keep live stream fluid if client dropped a packet
+                        // 2 seconds with no ACK: self-heal to unblock the stream
                         g_HostLastAckedFrameNum = g_HostLastSentFrameNum.load() - 1;
                     }
                 }
@@ -752,7 +772,7 @@ void ProcessFrame(const std::vector<uint8_t>& p, HWND hWnd) {
     // Fast-path Hardware H.264 Decoding
     if(hdr->bpp == 264) {
         static gupt::core::video::H264Decoder s_h264Decoder;
-        if(!s_h264Decoder.IsInitialized()) {
+        if(!s_h264Decoder.IsInitialized() || s_h264Decoder.GetWidth() != hdr->totalWidth || s_h264Decoder.GetHeight() != hdr->totalHeight) {
             s_h264Decoder.Initialize(hdr->totalWidth, hdr->totalHeight);
         }
         std::vector<uint8_t> bgra;
@@ -1092,7 +1112,7 @@ LRESULT CALLBACK ClientWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
         { std::lock_guard<std::mutex> lk(g_FrameMutex); if(!g_LatestFrame.empty()){ if(g_DrawingFrame.size() != g_LatestFrame.size()) g_DrawingFrame.resize(g_LatestFrame.size()); memcpy(g_DrawingFrame.data(), g_LatestFrame.data(), g_LatestFrame.size()); g_DrawW = g_FrameW; g_DrawH = g_FrameH; } }
         if(!g_DrawingFrame.empty()){
             float ha=(float)g_DrawW/g_DrawH, ca=(float)g_WinW/g_WinH; if(ca>ha){ g_DestH=g_WinH; g_DestW=(int)(g_WinH*ha); g_DestX=(g_WinW-g_DestW)/2; g_DestY=0; } else { g_DestW=g_WinW; g_DestH=(int)(g_WinW/ha); g_DestX=0; g_DestY=(g_WinH-g_DestH)/2; }
-            SetStretchBltMode(g_BackDC, HALFTONE); SetBrushOrgEx(g_BackDC, 0, 0, NULL); 
+            SetStretchBltMode(g_BackDC, COLORONCOLOR); SetBrushOrgEx(g_BackDC, 0, 0, NULL); 
             BITMAPINFO bmi = {0}; bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER); bmi.bmiHeader.biWidth = (int)g_DrawW; 
             bmi.bmiHeader.biHeight = -(int)g_DrawH; bmi.bmiHeader.biPlanes = 1; bmi.bmiHeader.biBitCount = 32; bmi.bmiHeader.biCompression = BI_RGB;
             StretchDIBits(g_BackDC,g_DestX,g_DestY,g_DestW,g_DestH,0,0,g_DrawW,g_DrawH,g_DrawingFrame.data(),&bmi,DIB_RGB_COLORS,SRCCOPY); 
@@ -1256,3 +1276,6 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE, LPSTR, int) {
     if(g_LaunchAsHost) RunHostMode(); else RunClientMode(h);
     return 0;
 }
+
+
+

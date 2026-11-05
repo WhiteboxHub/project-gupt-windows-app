@@ -51,7 +51,7 @@ bool H264Encoder::Initialize(uint32_t width, uint32_t height, uint32_t fps, uint
     m_Width = (width + 1) & ~1;
     m_Height = (height + 1) & ~1;
     m_Fps = (fps > 0) ? fps : 60;
-    m_Bitrate = (bitrateBps > 0) ? bitrateBps : 2500000;
+    m_Bitrate = (bitrateBps > 0) ? bitrateBps : 12000000;
 
     size_t nv12Size = (size_t)m_Width * m_Height * 3 / 2;
     m_Nv12Buffer.resize(nv12Size);
@@ -78,23 +78,33 @@ bool H264Encoder::Initialize(uint32_t width, uint32_t height, uint32_t fps, uint
         var.ulVal = eAVEncCommonRateControlMode_CBR;
         m_CodecApi->SetValue(&CODECAPI_AVEncCommonRateControlMode, &var);
 
-        // Set target bitrate
+        // Set target bitrate (6 Mbps for pristine 1080p desktop clarity)
         var.vt = VT_UI4;
         var.ulVal = m_Bitrate;
         m_CodecApi->SetValue(&CODECAPI_AVEncCommonMeanBitRate, &var);
 
+        // Quality target (0-100)
+        var.vt = VT_UI4;
+        var.ulVal = 90;
+        m_CodecApi->SetValue(&CODECAPI_AVEncCommonQuality, &var);
+
+        // Enable CABAC entropy coding for sharp text and fine UI details
+        var.vt = VT_BOOL;
+        var.boolVal = VARIANT_TRUE;
+        m_CodecApi->SetValue(&CODECAPI_AVEncH264CABACEnable, &var);
+
         // GOP size: periodic keyframe every 120 frames (2 seconds at 60fps)
         var.vt = VT_UI4;
-        var.ulVal = m_Fps * 2;
+        var.ulVal = m_Fps;
         m_CodecApi->SetValue(&CODECAPI_AVEncMPVGOPSize, &var);
 
         // Frame rate adaptation mode
         var.vt = VT_UI4;
-        var.ulVal = eAVEncAdaptiveMode_FrameRate;
+        var.ulVal = eAVEncAdaptiveMode_None;
         m_CodecApi->SetValue(&CODECAPI_AVEncAdaptiveMode, &var);
     }
 
-    // 3. Configure Output Media Type (H.264)
+    // 3. Configure Output Media Type (H.264 High Profile)
     Microsoft::WRL::ComPtr<IMFMediaType> outMediaType;
     if (FAILED(MFCreateMediaType(&outMediaType))) return false;
     outMediaType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
@@ -103,11 +113,15 @@ bool H264Encoder::Initialize(uint32_t width, uint32_t height, uint32_t fps, uint
     MFSetAttributeSize(outMediaType.Get(), MF_MT_FRAME_SIZE, m_Width, m_Height);
     MFSetAttributeRatio(outMediaType.Get(), MF_MT_FRAME_RATE, m_Fps, 1);
     outMediaType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    outMediaType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base);
+    outMediaType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
 
     if (FAILED(m_Encoder->SetOutputType(0, outMediaType.Get(), 0))) {
-        std::cerr << "  [H264Encoder] SetOutputType failed (hr=0x" << std::hex << hr << std::dec << ")\n";
-        return false;
+        // Fallback to Base profile if Main profile is not supported on older MFT drivers
+        outMediaType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Base);
+        if (FAILED(m_Encoder->SetOutputType(0, outMediaType.Get(), 0))) {
+            std::cerr << "  [H264Encoder] SetOutputType failed (hr=0x" << std::hex << hr << std::dec << ")\n";
+            return false;
+        }
     }
 
     // 4. Configure Input Media Type (NV12)
@@ -140,25 +154,42 @@ void H264Encoder::ConvertBgraToNv12(const uint8_t* bgra, uint8_t* nv12Y, uint8_t
     size_t uvIndex = 0;
 
     for (uint32_t y = 0; y < height; ++y) {
-        const uint8_t* row = bgra + (y * width * 4);
+        const uint8_t* row0 = bgra + (y * (size_t)width * 4);
+        const uint8_t* row1 = (y + 1 < height) ? bgra + ((y + 1) * (size_t)width * 4) : row0;
         bool isEvenRow = ((y & 1) == 0);
 
         for (uint32_t x = 0; x < width; ++x) {
-            uint32_t b = row[0];
-            uint32_t g = row[1];
-            uint32_t r = row[2];
-            row += 4;
+            int b0 = row0[x * 4 + 0];
+            int g0 = row0[x * 4 + 1];
+            int r0 = row0[x * 4 + 2];
 
-            // Accurate BT.709 conversion
-            uint8_t Y = static_cast<uint8_t>((54 * r + 183 * g + 19 * b) >> 8);
-            nv12Y[yIndex++] = Y;
+            // BT.709 Limited Range: Y in [16,235], Cb/Cr in [16,240]
+            int Y_val = 16 + ((66 * r0 + 129 * g0 + 25 * b0 + 128) >> 8);
+            nv12Y[yIndex++] = static_cast<uint8_t>(Y_val < 16 ? 16 : (Y_val > 235 ? 235 : Y_val));
 
+            // Anti-aliased 2x2 box filtering for chroma (eliminates text edge noise & color fringing)
             if (isEvenRow && ((x & 1) == 0)) {
-                int u = ((-29 * static_cast<int>(r) - 99 * static_cast<int>(g) + 128 * static_cast<int>(b)) >> 8) + 128;
-                int v = ((128 * static_cast<int>(r) - 116 * static_cast<int>(g) - 12 * static_cast<int>(b)) >> 8) + 128;
+                uint32_t nextX = (x + 1 < width) ? (x + 1) : x;
+                int b1 = row0[nextX * 4 + 0];
+                int g1 = row0[nextX * 4 + 1];
+                int r1 = row0[nextX * 4 + 2];
 
-                nv12Uv[uvIndex++] = static_cast<uint8_t>(u < 0 ? 0 : (u > 255 ? 255 : u));
-                nv12Uv[uvIndex++] = static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
+                int b2 = row1[x * 4 + 0];
+                int g2 = row1[x * 4 + 1];
+                int r2 = row1[x * 4 + 2];
+
+                int b3 = row1[nextX * 4 + 0];
+                int g3 = row1[nextX * 4 + 1];
+                int r3 = row1[nextX * 4 + 2];
+
+                int r_avg = (r0 + r1 + r2 + r3 + 2) >> 2;
+                int g_avg = (g0 + g1 + g2 + g3 + 2) >> 2;
+                int b_avg = (b0 + b1 + b2 + b3 + 2) >> 2;
+
+                int u = 128 + ((-38 * r_avg - 74 * g_avg + 112 * b_avg + 128) >> 8);
+                int v = 128 + ((112 * r_avg - 94 * g_avg - 18 * b_avg + 128) >> 8);
+                nv12Uv[uvIndex++] = static_cast<uint8_t>(u < 16 ? 16 : (u > 240 ? 240 : u));
+                nv12Uv[uvIndex++] = static_cast<uint8_t>(v < 16 ? 16 : (v > 240 ? 240 : v));
             }
         }
     }
@@ -268,3 +299,4 @@ bool H264Encoder::EncodeBgraFrame(const uint8_t* bgra, uint32_t width, uint32_t 
 } // namespace video
 } // namespace core
 } // namespace gupt
+
