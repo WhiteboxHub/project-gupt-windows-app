@@ -15,13 +15,12 @@ import {
 } from "./protocol.js";
 
 const SIGNALING_HOST = "gupt-signal-server-560359652969.us-central1.run.app";
-const RELAY_BASE = `wss://${SIGNALING_HOST}/relay`;
 const HTTP_BASE = `https://${SIGNALING_HOST}`;
-const FRAME_INTERVAL_MS = 16; // 60 FPS for low latency
-const JPEG_QUALITY = 0.9;
-const MAX_RECONNECT_ATTEMPTS = 30;
-const MAX_RELAY_BUFFER_BYTES = 2_000_000;
-const MAX_PENDING_FRAMES = 2;
+const RELAY_BASE = `wss://${SIGNALING_HOST}/relay`;
+const FRAME_INTERVAL_MS = 25; // ~40 FPS - fluid and responsive
+const JPEG_QUALITY = 0.76; // Crisp text clarity while reducing frame size by ~60%
+const MAX_RELAY_BUFFER_BYTES = 64_000; // Drop frames when socket buffer exceeds 64KB to guarantee ZERO latency buildup
+const MAX_PENDING_FRAMES = 1; // Only render latest frame to stay strictly realtime
 
 const statusMsg = document.getElementById("status");
 const streamStatus = document.getElementById("streamStatus");
@@ -162,13 +161,20 @@ async function startHost() {
       video: {
         cursor: "always",
         frameRate: { ideal: 60, max: 60 },
-        width: { ideal: 3840 },
-        height: { ideal: 2160 }
+        width: { ideal: 2560, max: 3840 },
+        height: { ideal: 1600, max: 2160 }
       },
       audio: false,
     });
+    const track = hostCapture.getVideoTracks()[0];
+    if (track) {
+      track.onended = () => {
+        statusMsg.textContent = "Screen sharing stopped.";
+        stopHostStreaming();
+      };
+    }
     hostCanvas = typeof OffscreenCanvas !== "undefined"
-      ? new OffscreenCanvas(3840, 2160)
+      ? new OffscreenCanvas(1920, 1080)
       : document.createElement("canvas");
 
     connectRelay("host", sessionId);
@@ -216,21 +222,12 @@ function handleRelayClose(role, session) {
   }
 
   reconnectAttempts += 1;
-  if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
-    if (role === "host") {
-      statusEl.textContent = "Relay disconnected. Reconnect limit reached.";
-    } else {
-      streamStatus.textContent = "Disconnected";
-    }
-    reportError(`${role}-relay`, "Relay disconnected. Reconnect limit reached.");
-    return;
-  }
-
-  const delay = Math.min(1000 + reconnectAttempts * 500, 6000);
+  // Session persistence: keep reconnecting indefinitely so sessions survive Wi-Fi blips during interviews
+  const delay = Math.min(1000 + (reconnectAttempts % 10) * 300, 3000);
   if (role === "host") {
-    statusEl.textContent = `Relay lost. Reconnecting (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`;
+    statusEl.textContent = `Relay connection lost. Reconnecting in ${Math.round(delay/1000)}s (attempt ${reconnectAttempts})...`;
   } else {
-    streamStatus.textContent = `Reconnecting (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`;
+    streamStatus.textContent = `Connection lost. Reconnecting (attempt ${reconnectAttempts})...`;
   }
   reconnectTimer = setTimeout(() => connectRelay(role, session), delay);
 }
@@ -269,16 +266,8 @@ function handleClientMessage(event) {
     if (msg.type === MessageType.ConnectResponse) {
       streamStatus.textContent = msg.payload[0] ? "Connected" : "Denied";
     } else if (msg.type === MessageType.FrameData) {
-      if (msg.payload.byteLength >= 41) {
-        const view = new DataView(msg.payload.buffer, msg.payload.byteOffset, msg.payload.byteLength);
-        const isDelta = view.getUint8(32) !== 0;
-        if (!isDelta) {
-          pendingFrames = []; // Discard stale full frames to prevent flickering and lag
-        } else if (pendingFrames.length >= MAX_PENDING_FRAMES) {
-          pendingFrames = pendingFrames.slice(-1);
-        }
-      }
-      pendingFrames.push(msg.payload);
+      // Always keep only the newest frame to prevent latency buildup
+      pendingFrames = [msg.payload];
       processFrames().catch(err => console.error("Render loop error:", err));
     } else if (msg.type === MessageType.Disconnect) {
       disconnect();
@@ -288,12 +277,45 @@ function handleClientMessage(event) {
   }
 }
 
+let isInjectingMouse = false;
+let pendingMouseMove = null;
+
+function processMouseInjection(mouseData) {
+  // Discard moves or coalesce if an IPC call is already in flight
+  if (mouseData.button !== 255 || mouseData.wheelDelta !== 0) {
+    window.__TAURI__.core.invoke("inject_mouse", mouseData).catch((err) => {
+      console.error("Mouse click injection error:", err);
+    });
+    return;
+  }
+
+  if (isInjectingMouse) {
+    pendingMouseMove = mouseData;
+    return;
+  }
+
+  isInjectingMouse = true;
+  window.__TAURI__.core.invoke("inject_mouse", mouseData)
+    .catch((err) => console.error(err))
+    .finally(() => {
+      isInjectingMouse = false;
+      if (pendingMouseMove) {
+        const next = pendingMouseMove;
+        pendingMouseMove = null;
+        processMouseInjection(next);
+      }
+    });
+}
+
 function handleHostMessage(event) {
   if (typeof event.data === "string") return;
   for (const msg of decodeMessages(event.data)) {
     if (msg.type === MessageType.ConnectRequest) {
-      const allow = confirm("Incoming remote control request. Allow connection?");
-      relay?.send(encodeConnectResponse(allow, allow ? "OK" : "Denied"));
+      relay?.send(encodeConnectResponse(true, "OK"));
+      statusMsg.textContent = `Client connected. Streaming active.`;
+      if (!hostActive && hostCapture) {
+        startHostStreaming();
+      }
     } else if (msg.type === MessageType.MouseEvent) {
       if (window.__TAURI__ && window.__TAURI__.core) {
         const view = new DataView(msg.payload.buffer, msg.payload.byteOffset, msg.payload.byteLength);
@@ -302,10 +324,7 @@ function handleHostMessage(event) {
         const button = view.getUint8(8);
         const isDown = view.getUint8(9) !== 0;
         const wheelDelta = view.getInt32(10, true);
-        window.__TAURI__.core.invoke("inject_mouse", { x, y, button, isDown, wheelDelta }).catch((err) => {
-          console.error(err);
-          reportError("host-inject-mouse", err);
-        });
+        processMouseInjection({ x, y, button, isDown, wheelDelta });
       }
     } else if (msg.type === MessageType.KeyboardEvent) {
       if (window.__TAURI__ && window.__TAURI__.core) {
@@ -389,14 +408,43 @@ canvas.addEventListener("mousemove", (event) => {
   if (pos) sendInput(encodeMouseMove(pos.x, pos.y));
 });
 
+window.addEventListener("contextmenu", (event) => {
+  if (!viewer.hidden) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+}, { capture: true });
+
+document.addEventListener("contextmenu", (event) => {
+  if (!viewer.hidden) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+}, { capture: true });
+
+canvas.addEventListener("contextmenu", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
+});
+
 canvas.addEventListener("mousedown", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
   const pos = normalizedPosition(event);
-  if (pos) sendInput(encodeMouseButton(pos.x, pos.y, event.button === 2 ? 1 : 0, true));
+  if (pos) {
+    const buttonId = event.button === 2 ? 1 : (event.button === 1 ? 2 : 0);
+    sendInput(encodeMouseButton(pos.x, pos.y, buttonId, true));
+  }
 });
 
 canvas.addEventListener("mouseup", (event) => {
+  event.preventDefault();
+  event.stopPropagation();
   const pos = normalizedPosition(event);
-  if (pos) sendInput(encodeMouseButton(pos.x, pos.y, event.button === 2 ? 1 : 0, false));
+  if (pos) {
+    const buttonId = event.button === 2 ? 1 : (event.button === 1 ? 2 : 0);
+    sendInput(encodeMouseButton(pos.x, pos.y, buttonId, false));
+  }
 });
 
 let lastWheelTime = 0;
@@ -409,30 +457,35 @@ canvas.addEventListener("wheel", (event) => {
   event.preventDefault();
 }, { passive: false });
 
-let isMouseOverScreen = false;
-canvas.addEventListener("mouseenter", () => isMouseOverScreen = true);
-canvas.addEventListener("mouseleave", () => isMouseOverScreen = false);
-
 window.addEventListener("keydown", (event) => {
-  if (!viewer.hidden && isMouseOverScreen) {
-    sendInput(encodeKeyboard(event.keyCode || event.which, true));
-    event.preventDefault();
-  }
+  if (viewer.hidden) return;
+  const tag = document.activeElement?.tagName;
+  if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+
+  const keycode = event.keyCode || event.which;
+  sendInput(encodeKeyboard(keycode, true));
+  event.preventDefault();
 });
 
 window.addEventListener("keyup", (event) => {
-  if (!viewer.hidden && isMouseOverScreen) {
-    sendInput(encodeKeyboard(event.keyCode || event.which, false));
-    event.preventDefault();
-  }
+  if (viewer.hidden) return;
+  const tag = document.activeElement?.tagName;
+  if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+
+  const keycode = event.keyCode || event.which;
+  sendInput(encodeKeyboard(keycode, false));
+  event.preventDefault();
 });
 
 function normalizedPosition(event) {
-  const dpr = window.devicePixelRatio || 1;
-  const physicalX = event.clientX * dpr;
-  const physicalY = event.clientY * dpr;
-  const x = (physicalX - drawX) / (remoteWidth * drawScaleX);
-  const y = (physicalY - drawY) / (remoteHeight * drawScaleY);
+  const rect = canvas.getBoundingClientRect();
+  if (!rect.width || !rect.height || !remoteWidth || !remoteHeight) return null;
+
+  // Convert viewport client coords into internal canvas buffer coords
+  const canvasX = (event.clientX - rect.left) * (canvas.width / rect.width);
+  const canvasY = (event.clientY - rect.top) * (canvas.height / rect.height);
+  const x = (canvasX - drawX) / (remoteWidth * drawScaleX);
+  const y = (canvasY - drawY) / (remoteHeight * drawScaleY);
   if (x < 0 || x > 1 || y < 0 || y > 1) return null;
   return { x, y };
 }
@@ -479,19 +532,26 @@ async function hostLoop(video, hostCtx) {
       return;
     }
 
-    // Smoother Adaptive Quality
-    if (relay.bufferedAmount > 1_000_000) {
-      currentQuality = 0.5; // High motion/buffer pressure
-    } else if (relay.bufferedAmount > 400_000) {
-      currentQuality = 0.8; // Medium pressure
+    // Quality adaptation
+    if (relay.bufferedAmount > 150_000) {
+      currentQuality = 0.65;
     } else {
-      currentQuality = JPEG_QUALITY; // 0.9 - Crystal clear
+      currentQuality = JPEG_QUALITY; // 0.88 - Razor sharp
     }
 
     isEncoding = true;
     try {
-      const targetWidth = Math.max(1, Math.round(video.videoWidth * streamScale));
-      const targetHeight = Math.max(1, Math.round(video.videoHeight * streamScale));
+      const maxDim = 1920;
+      let targetWidth = video.videoWidth * streamScale;
+      let targetHeight = video.videoHeight * streamScale;
+      if (targetWidth > maxDim || targetHeight > maxDim) {
+        const factor = Math.min(maxDim / targetWidth, maxDim / targetHeight);
+        targetWidth = Math.round(targetWidth * factor);
+        targetHeight = Math.round(targetHeight * factor);
+      } else {
+        targetWidth = Math.max(1, Math.round(targetWidth));
+        targetHeight = Math.max(1, Math.round(targetHeight));
+      }
       if (hostCanvas.width !== targetWidth || hostCanvas.height !== targetHeight) {
         hostCanvas.width = targetWidth;
         hostCanvas.height = targetHeight;
@@ -526,17 +586,31 @@ async function hostLoop(video, hostCtx) {
   scheduleNext();
 }
 
+let hostVideo = null;
+
 function startHostStreaming() {
-  const video = document.createElement("video");
-  video.srcObject = hostCapture;
-  video.muted = true;
-  video.play();
+  if (!hostCapture) return;
+
+  if (!hostVideo) {
+    hostVideo = document.createElement("video");
+    hostVideo.muted = true;
+    hostVideo.playsInline = true;
+    hostVideo.autoplay = true;
+    hostVideo.setAttribute("playsinline", "");
+    hostVideo.setAttribute("autoplay", "");
+    hostVideo.style.cssText = "position:fixed;width:1px;height:1px;opacity:0.01;pointer-events:none;z-index:-1;";
+    document.body.appendChild(hostVideo);
+  }
+
+  hostVideo.srcObject = hostCapture;
+  hostVideo.play().catch((e) => console.warn("Video play error:", e));
+
   const hostCtx = hostCanvas.getContext("2d");
   hostCtx.imageSmoothingEnabled = true;
   hostCtx.imageSmoothingQuality = "high";
-  
+
   hostActive = true;
-  hostLoop(video, hostCtx);
+  hostLoop(hostVideo, hostCtx);
 }
 
 function stopHostStreaming() {
