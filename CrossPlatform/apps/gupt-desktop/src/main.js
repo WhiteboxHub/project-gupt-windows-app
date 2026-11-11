@@ -430,12 +430,32 @@ async function renderFrame(payload) {
 
 function resizeCanvas() {
   const dpr = window.devicePixelRatio || 1;
-  canvas.width = window.innerWidth * dpr;
-  canvas.height = window.innerHeight * dpr;
-  ctx.fillStyle = "#000";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
+  const newW = Math.floor(window.innerWidth * dpr);
+  const newH = Math.floor(window.innerHeight * dpr);
+
+  if (canvas.width !== newW || canvas.height !== newH) {
+    if (canvas.width > 0 && canvas.height > 0) {
+      const tempCanvas = document.createElement("canvas");
+      tempCanvas.width = canvas.width;
+      tempCanvas.height = canvas.height;
+      const tempCtx = tempCanvas.getContext("2d");
+      tempCtx.drawImage(canvas, 0, 0);
+
+      canvas.width = newW;
+      canvas.height = newH;
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(tempCanvas, 0, 0, newW, newH);
+    } else {
+      canvas.width = newW;
+      canvas.height = newH;
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+    }
+  }
+
   if (!remoteWidth || !remoteHeight) return;
   const scaleX = canvas.width / remoteWidth;
   const scaleY = canvas.height / remoteHeight;
@@ -460,8 +480,8 @@ function sendInput(bytes) {
 
 let lastMouseTime = 0;
 canvas.addEventListener("mousemove", (event) => {
-  const now = Date.now();
-  if (now - lastMouseTime < 16) return;
+  const now = performance.now();
+  if (now - lastMouseTime < 4) return;
   lastMouseTime = now;
   const pos = normalizedPosition(event);
   if (pos) sendInput(encodeMouseMove(pos.x, pos.y));

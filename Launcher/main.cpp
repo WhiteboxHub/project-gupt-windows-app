@@ -35,7 +35,7 @@ static std::string g_CurrentSessionId = "";
 static std::string g_HostIp = "";
 static bool g_LaunchAsHost = false;
 static int g_Launched = 0;
-static bool g_ForceFullScan = true;
+static std::atomic<bool> g_ForceFullScan{true};
 static bool g_IsConnected = false, g_UsingRelay = false, g_SidebarOpen = false, g_IsFullscreen = false, g_SessionActive = false, g_ClipboardSyncEnabled = true;
 
 static std::mutex g_FrameMutex, g_hostClipMtx, g_EvMtx, g_SendMtx, g_EncMtx;
@@ -133,7 +133,7 @@ static void HostEncoderLoop(gupt::core::capture::ScreenCapturer* capturer) {
         }
         if(!raw.empty()) {
             frameCounter++;
-            if(!hasDirty || frameCounter > 240) {
+            if(g_ForceFullScan.exchange(false) || !hasDirty || frameCounter > 60) {
                 minX = 0; minY = 0; tw = w; th = h; frameCounter = 0;
             }
 
@@ -301,6 +301,7 @@ static void RunHostMode() {
             for(auto& msg : msgs) {
                 auto t = msg.first; auto& p = msg.second;
                 if(t == shared::MessageType::ConnectRequest) {
+                    g_ForceFullScan = true;
                     if(g_SessionActive) {
                         shared::ConnectResponse res={true, "OK"}; auto f = shared::SerializeMessage(shared::MessageType::ConnectResponse, res);
                         g_Relay.Send(f.data(), f.size());
@@ -328,6 +329,7 @@ static void RunHostMode() {
 
     server.SetMessageCallback([&](shared::MessageType t, const std::vector<uint8_t>& p) {
         if(t==shared::MessageType::ConnectRequest) {
+            g_ForceFullScan = true;
             if(g_SessionActive) {
                 shared::ConnectResponse res={true,"OK"}; server.SendRaw(shared::SerializeMessage(shared::MessageType::ConnectResponse,res));
             } else if(MessageBoxA(NULL, "Remote client is requesting access on LAN. Allow?", "Gupt Security", MB_YESNO|MB_ICONQUESTION|MB_SETFOREGROUND)==IDYES) {
