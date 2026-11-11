@@ -149,11 +149,11 @@ static void HostEncoderLoop(gupt::core::capture::ScreenCapturer* capturer) {
                     std::vector<uint8_t> jpg;
                     uint64_t regionPixels = static_cast<uint64_t>(tw) * static_cast<uint64_t>(th);
                     uint64_t screenPixels = static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
-                    bool videoLike = regionPixels > (screenPixels / 3);
-                    int quality = videoLike ? 85 : 95;
-                    bool force444 = true; // Always use 4:4:4 chroma for perfect text
+                    bool videoLike = regionPixels > (screenPixels / 4);
+                    int quality = videoLike ? 70 : 92;
+                    bool force444 = !videoLike; // 4:4:4 for razor-sharp text, 4:2:0 for video motion to prevent network choking
                     if(capturer->CaptureRegionJpeg(raw, w, h, minX, minY, tw, th, jpg, quality, force444)){
-                        PushOutbound(gupt::shared::SerializeFrame({0, w, h, tw, th, minX, minY, 32, (tw < w || th < h), 0}, jpg), false);
+                        PushOutbound(gupt::shared::SerializeFrame({0, w, h, tw, th, minX, minY, 32, (tw < w || th < h), (uint64_t)GetTickCount64()}, jpg), false);
                     }
                 }
             }

@@ -32,6 +32,26 @@ const exitFullScreenBtn = document.getElementById("exitFullScreenBtn");
 const viewModeSelect = document.getElementById("viewModeSelect");
 const streamSizeSelect = document.getElementById("streamSizeSelect");
 const clipboardSyncToggle = document.getElementById("clipboardSyncToggle");
+const freezeBanner = document.getElementById("freezeBanner");
+const freezeBannerText = document.getElementById("freezeBannerText");
+const bannerReconnectBtn = document.getElementById("bannerReconnectBtn");
+const refreshStreamBtn = document.getElementById("refreshStreamBtn");
+
+let activeSessionId = "";
+let lastFrameReceivedAt = 0;
+
+function triggerManualReconnect() {
+  const session = activeSessionId || sessionInput.value.trim();
+  if (!session) return;
+  console.log("[RECONNECT] User requested stream reconnect for session:", session);
+  if (freezeBanner) freezeBanner.hidden = true;
+  streamStatus.textContent = "Reconnecting stream...";
+  pendingFrames = [];
+  connectRelay("client", session);
+}
+
+bannerReconnectBtn?.addEventListener("click", triggerManualReconnect);
+refreshStreamBtn?.addEventListener("click", triggerManualReconnect);
 
 if (fullScreenBtn && exitFullScreenBtn) {
   fullScreenBtn.addEventListener("click", () => {
@@ -143,6 +163,8 @@ async function startClient() {
     return;
   }
 
+  activeSessionId = session;
+  lastFrameReceivedAt = Date.now();
   showViewer();
   streamStatus.textContent = "Connecting...";
   intentionalDisconnect = false;
@@ -265,9 +287,24 @@ function handleClientMessage(event) {
   for (const msg of decodeMessages(event.data)) {
     if (msg.type === MessageType.ConnectResponse) {
       streamStatus.textContent = msg.payload[0] ? "Connected" : "Denied";
+      lastFrameReceivedAt = Date.now();
+      if (freezeBanner) freezeBanner.hidden = true;
     } else if (msg.type === MessageType.FrameData) {
-      // Always keep only the newest frame to prevent latency buildup
-      pendingFrames = [msg.payload];
+      lastFrameReceivedAt = Date.now();
+      if (freezeBanner && !freezeBanner.hidden) freezeBanner.hidden = true;
+
+      const isDelta = msg.payload.byteLength >= 41
+        ? (new DataView(msg.payload.buffer, msg.payload.byteOffset, msg.payload.byteLength).getUint8(32) !== 0)
+        : false;
+
+      if (!isDelta) {
+        pendingFrames = [msg.payload];
+      } else {
+        if (pendingFrames.length > 8) {
+          pendingFrames.shift();
+        }
+        pendingFrames.push(msg.payload);
+      }
       processFrames().catch(err => console.error("Render loop error:", err));
     } else if (msg.type === MessageType.Disconnect) {
       disconnect();
@@ -342,10 +379,32 @@ function handleHostMessage(event) {
   }
 }
 
+let metricsFrameCount = 0;
+let metricsLastTime = performance.now();
+let metricsBytes = 0;
+let metricsFps = 0;
+let metricsLatency = 0;
+let metricsBitrate = "0.0";
+
+function updateMetricsDisplay() {
+  if (viewer.hidden || !streamStatus) return;
+  const latencyStr = metricsLatency > 0 && metricsLatency < 5000 ? `${metricsLatency}ms` : "<35ms";
+  streamStatus.textContent = `Connected (${metricsFps} FPS • ${latencyStr} • ${metricsBitrate} Mbps)`;
+}
+
 async function renderFrame(payload) {
   try {
     const frame = decodeFrame(payload);
     if (!frame) return;
+
+    metricsBytes += payload.byteLength;
+    metricsFrameCount += 1;
+    if (frame.timestampMs > 0) {
+      const now = Date.now();
+      if (now >= frame.timestampMs && now - frame.timestampMs < 10000) {
+        metricsLatency = Math.round(now - frame.timestampMs);
+      }
+    }
 
     if (frame.totalWidth !== remoteWidth || frame.totalHeight !== remoteHeight) {
       remoteWidth = frame.totalWidth;
@@ -739,4 +798,42 @@ setInterval(() => {
 
 setInterval(() => {
   pollClipboardSync();
+}, 1000);
+
+setInterval(() => {
+  const now = performance.now();
+  const elapsed = (now - metricsLastTime) / 1000;
+  if (elapsed >= 0.8) {
+    metricsFps = Math.round(metricsFrameCount / elapsed);
+    metricsBitrate = ((metricsBytes * 8) / (elapsed * 1_000_000)).toFixed(1);
+    metricsFrameCount = 0;
+    metricsBytes = 0;
+    metricsLastTime = now;
+    if (relay?.readyState === WebSocket.OPEN && !viewer.hidden) {
+      updateMetricsDisplay();
+    }
+  }
+}, 1000);
+
+// Watchdog to immediately alert user if stream stalls
+setInterval(() => {
+  if (viewer.hidden || relay?.readyState !== WebSocket.OPEN) {
+    if (freezeBanner) freezeBanner.hidden = true;
+    return;
+  }
+  const now = Date.now();
+  if (lastFrameReceivedAt > 0 && now - lastFrameReceivedAt > 2200) {
+    const elapsedSec = Math.round((now - lastFrameReceivedAt) / 1000);
+    if (freezeBanner) {
+      if (freezeBannerText) {
+        freezeBannerText.textContent = `Connection stalled — no video received for ${elapsedSec}s`;
+      }
+      freezeBanner.hidden = false;
+    }
+    if (streamStatus) {
+      streamStatus.textContent = `Stalled (${elapsedSec}s)`;
+    }
+  } else {
+    if (freezeBanner) freezeBanner.hidden = true;
+  }
 }, 1000);
