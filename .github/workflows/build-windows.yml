@@ -2,7 +2,7 @@ name: Build Windows Gupt.exe
 
 on:
   push:
-    branches: [ feature_gupt, main ]
+    branches: [ feature_gupt, main, Jt_dev ]
   workflow_dispatch:
 
 jobs:
