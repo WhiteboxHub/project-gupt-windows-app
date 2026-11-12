@@ -331,11 +331,15 @@ static void RunHostMode() {
                 auto t = msg.first; auto& p = msg.second;
                 if(t == shared::MessageType::ConnectRequest) {
                     g_ForceFullScan = true;
-                    g_SessionActive = true;
-                    g_UsingRelay = true;
-                    shared::ConnectResponse res={true, "OK"};
-                    auto f = shared::SerializeMessage(shared::MessageType::ConnectResponse, res);
-                    g_Relay.Send(f.data(), f.size());
+                    if(g_SessionActive) {
+                        shared::ConnectResponse res={true, "OK"}; auto f = shared::SerializeMessage(shared::MessageType::ConnectResponse, res);
+                        g_Relay.Send(f.data(), f.size());
+                    } else if(MessageBoxA(NULL, "Remote client is requesting access via Internet. Allow?", "Gupt Security", MB_YESNO|MB_ICONQUESTION|MB_SETFOREGROUND|MB_TOPMOST)==IDYES) {
+                        shared::ConnectResponse res={true, "OK"}; auto f = shared::SerializeMessage(shared::MessageType::ConnectResponse, res);
+                        g_Relay.Send(f.data(), f.size()); g_SessionActive = true; g_UsingRelay = true; 
+                    } else { 
+                        shared::ConnectResponse res={false, "Denied"}; auto f = shared::SerializeMessage(shared::MessageType::ConnectResponse, res); g_Relay.Send(f.data(), f.size()); 
+                    }
                 }
                 else if(t == shared::MessageType::Disconnect) {
                     g_SessionActive = false;
@@ -359,9 +363,13 @@ static void RunHostMode() {
     server.SetMessageCallback([&](shared::MessageType t, const std::vector<uint8_t>& p) {
         if(t==shared::MessageType::ConnectRequest) {
             g_ForceFullScan = true;
-            g_SessionActive = true;
-            shared::ConnectResponse res={true,"OK"}; 
-            server.SendRaw(shared::SerializeMessage(shared::MessageType::ConnectResponse,res));
+            if(g_SessionActive) {
+                shared::ConnectResponse res={true,"OK"}; server.SendRaw(shared::SerializeMessage(shared::MessageType::ConnectResponse,res));
+            } else if(MessageBoxA(NULL, "Remote client is requesting access on LAN. Allow?", "Gupt Security", MB_YESNO|MB_ICONQUESTION|MB_SETFOREGROUND|MB_TOPMOST)==IDYES) {
+                g_SessionActive=true; shared::ConnectResponse res={true,"OK"}; server.SendRaw(shared::SerializeMessage(shared::MessageType::ConnectResponse,res));
+            } else {
+                shared::ConnectResponse res={false,"Denied"}; server.SendRaw(shared::SerializeMessage(shared::MessageType::ConnectResponse,res));
+            }
         }
         else if(t==shared::MessageType::Disconnect) {
             g_SessionActive = false;
