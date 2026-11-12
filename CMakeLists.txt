@@ -13,7 +13,7 @@ endif()
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 # Group core dependencies
-set(WINDOWS_LIBS d3d11 dxgi ws2_32 user32 gdi32 msimg32 windowscodecs shlwapi comctl32 winhttp)
+set(WINDOWS_LIBS d3d11 dxgi ws2_32 user32 gdi32 msimg32 windowscodecs shlwapi comctl32 winhttp shell32)
 
 # Include directories
 set(CORE_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR})

@@ -14,6 +14,7 @@
 #include <vector>
 #include <winhttp.h>
 #include <shlwapi.h>
+#include <shellapi.h>
 #include <wincodec.h>
 #include <condition_variable>
 #include "Shared/Protocol.h"
@@ -23,6 +24,7 @@
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "comctl32.lib")
 
@@ -574,8 +576,35 @@ LRESULT CALLBACK LauncherWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
     } return 0;
 }
 
-int WINAPI WinMain(HINSTANCE h, HINSTANCE, LPSTR, int) {
+int WINAPI WinMain(HINSTANCE h, HINSTANCE, LPSTR lpCmdLine, int) {
     SetProcessDPIAware(); CoInitializeEx(0, COINIT_MULTITHREADED);
+
+    // Auto-Elevation to bypass Windows UIPI (enables controlling Task Manager and elevated windows)
+    BOOL isElevated = FALSE;
+    HANDLE hToken = NULL;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
+        TOKEN_ELEVATION elevation;
+        DWORD cbSize = sizeof(TOKEN_ELEVATION);
+        if (GetTokenInformation(hToken, TokenElevation, &elevation, sizeof(elevation), &cbSize)) {
+            isElevated = elevation.TokenIsElevated;
+        }
+        CloseHandle(hToken);
+    }
+
+    if (!isElevated) {
+        char szPath[MAX_PATH];
+        if (GetModuleFileNameA(NULL, szPath, MAX_PATH)) {
+            SHELLEXECUTEINFOA sei = { sizeof(sei) };
+            sei.lpVerb = "runas";
+            sei.lpFile = szPath;
+            sei.lpParameters = lpCmdLine;
+            sei.nShow = SW_SHOWNORMAL;
+            if (ShellExecuteExA(&sei)) {
+                return 0; // Elevated instance launched, terminate un-elevated process
+            }
+        }
+    }
+
     std::thread(EvSenderLoop).detach();
     CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&g_WICFactory));
     WNDCLASSEXA wc={sizeof(WNDCLASSEXA)}; wc.lpfnWndProc=LauncherWndProc; wc.hInstance=h; wc.hIcon=(HICON)LoadImageA(h,MAKEINTRESOURCEA(101),IMAGE_ICON,32,32,0); wc.lpszClassName="GuptL"; wc.hbrBackground=CreateSolidBrush(CLR_BG); wc.hCursor=LoadCursor(0,IDC_ARROW); RegisterClassExA(&wc);
