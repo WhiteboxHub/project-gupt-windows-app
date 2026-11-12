@@ -354,8 +354,6 @@ static void RunHostMode() {
         }
     }).detach();
 
-    MessageBoxA(NULL, ("Gupt Host is active!\n\nSession ID: " + g_CurrentSessionId).c_str(), "Gupt", MB_OK|MB_ICONINFORMATION);
-
     core::network::TcpServer server(8080); 
     injector.Initialize();
     core::capture::ScreenCapturer capturer; capturer.Initialize();
@@ -385,6 +383,11 @@ static void RunHostMode() {
     std::thread([](){ while(true){ if(g_SessionActive) PushOutbound({0},true); Sleep(2000); } }).detach();
 
     server.Start();
+
+    // Show Session ID non-blockingly so video capturing and encoding start immediately
+    std::thread([](){
+        MessageBoxA(NULL, ("Gupt Host is active!\n\nSession ID: " + g_CurrentSessionId).c_str(), "Gupt", MB_OK|MB_ICONINFORMATION|MB_TOPMOST);
+    }).detach();
 
     while(true) {
         if(g_SessionActive) {

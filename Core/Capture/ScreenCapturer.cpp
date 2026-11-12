@@ -57,18 +57,58 @@ bool ScreenCapturer::Initialize() {
     return true;
 }
 
+bool ScreenCapturer::CaptureGdiFallback(std::vector<uint8_t>& outPixels, uint32_t& outWidth, uint32_t& outHeight) {
+    HDC hScreenDC = GetDC(NULL);
+    if (!hScreenDC) return false;
+    int w = GetSystemMetrics(SM_CXSCREEN);
+    int h = GetSystemMetrics(SM_CYSCREEN);
+    if (w <= 0 || h <= 0) { ReleaseDC(NULL, hScreenDC); return false; }
+
+    HDC hMemDC = CreateCompatibleDC(hScreenDC);
+    HBITMAP hBitmap = CreateCompatibleBitmap(hScreenDC, w, h);
+    HBITMAP hOldBitmap = (HBITMAP)SelectObject(hMemDC, hBitmap);
+
+    BitBlt(hMemDC, 0, 0, w, h, hScreenDC, 0, 0, SRCCOPY);
+
+    BITMAPINFO bmi = {0};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = -h; // top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    outWidth = static_cast<uint32_t>(w);
+    outHeight = static_cast<uint32_t>(h);
+    outPixels.resize(outWidth * outHeight * 4);
+
+    GetDIBits(hMemDC, hBitmap, 0, h, outPixels.data(), &bmi, DIB_RGB_COLORS);
+
+    SelectObject(hMemDC, hOldBitmap);
+    DeleteObject(hBitmap);
+    DeleteDC(hMemDC);
+    ReleaseDC(NULL, hScreenDC);
+
+    m_LastDirtyBounds = { 0, 0, static_cast<LONG>(w), static_cast<LONG>(h) };
+    m_HasLastDirtyBounds = true;
+    return true;
+}
+
 bool ScreenCapturer::CaptureNextFrame(std::vector<uint8_t>& outPixels, uint32_t& outWidth, uint32_t& outHeight) {
-    if (!m_DeskDupl && !Initialize()) return false;
+    if (!m_DeskDupl && !Initialize()) return CaptureGdiFallback(outPixels, outWidth, outHeight);
     ComPtr<IDXGIResource> resource; DXGI_OUTDUPL_FRAME_INFO info;
     HRESULT hr = m_DeskDupl->AcquireNextFrame(100, &info, &resource);
-    if (hr == DXGI_ERROR_WAIT_TIMEOUT) return false;
+    if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+        // If screen is static and we have no frames, capture via GDI to ensure first frame renders
+        return CaptureGdiFallback(outPixels, outWidth, outHeight);
+    }
     if (FAILED(hr)) {
         if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET || hr == DXGI_ERROR_INVALID_CALL) {
             Reset();
             Sleep(250);
             Initialize();
         }
-        return false;
+        return CaptureGdiFallback(outPixels, outWidth, outHeight);
     }
 
     ComPtr<ID3D11Texture2D> tex; if (FAILED(resource.As(&tex))) { m_DeskDupl->ReleaseFrame(); return false; }
