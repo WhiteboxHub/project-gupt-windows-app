@@ -95,20 +95,23 @@ bool ScreenCapturer::CaptureGdiFallback(std::vector<uint8_t>& outPixels, uint32_
 }
 
 bool ScreenCapturer::CaptureNextFrame(std::vector<uint8_t>& outPixels, uint32_t& outWidth, uint32_t& outHeight) {
-    if (!m_DeskDupl && !Initialize()) return CaptureGdiFallback(outPixels, outWidth, outHeight);
-    ComPtr<IDXGIResource> resource; DXGI_OUTDUPL_FRAME_INFO info;
-    HRESULT hr = m_DeskDupl->AcquireNextFrame(100, &info, &resource);
-    if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
-        // If screen is static and we have no frames, capture via GDI to ensure first frame renders
+    if (!m_DeskDupl && !Initialize()) {
+        static uint64_t lastGdi = 0;
+        uint64_t now = GetTickCount64();
+        if (now - lastGdi < 33) return false;
+        lastGdi = now;
         return CaptureGdiFallback(outPixels, outWidth, outHeight);
     }
+    ComPtr<IDXGIResource> resource; DXGI_OUTDUPL_FRAME_INFO info;
+    HRESULT hr = m_DeskDupl->AcquireNextFrame(100, &info, &resource);
+    if (hr == DXGI_ERROR_WAIT_TIMEOUT) return false;
     if (FAILED(hr)) {
         if (hr == DXGI_ERROR_ACCESS_LOST || hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET || hr == DXGI_ERROR_INVALID_CALL) {
             Reset();
             Sleep(250);
             Initialize();
         }
-        return CaptureGdiFallback(outPixels, outWidth, outHeight);
+        return false;
     }
 
     ComPtr<ID3D11Texture2D> tex; if (FAILED(resource.As(&tex))) { m_DeskDupl->ReleaseFrame(); return false; }

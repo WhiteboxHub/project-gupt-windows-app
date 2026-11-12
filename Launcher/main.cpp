@@ -393,7 +393,12 @@ static void RunHostMode() {
         if(g_SessionActive) {
             uint64_t loopStart = GetTickCount64();
             std::vector<uint8_t> raw; uint32_t w, h;
-            if(capturer.CaptureNextFrame(raw, w, h)) {
+            bool gotFrame = capturer.CaptureNextFrame(raw, w, h);
+            if(!gotFrame && g_ForceFullScan) {
+                // If desktop is static on initial connect, capture one clean keyframe via GDI
+                gotFrame = capturer.CaptureGdiFallback(raw, w, h);
+            }
+            if(gotFrame) {
                 uint32_t dx=0, dy=0, dw=0, dh=0;
                 bool hasDirty = capturer.GetLastDirtyBounds(dx, dy, dw, dh);
                 { std::lock_guard<std::mutex> lk(g_EncMtx); g_RawQueue = std::move(raw); g_RawW = w; g_RawH = h; g_DirtyX = dx; g_DirtyY = dy; g_DirtyW = dw; g_DirtyH = dh; g_HasDirtyBounds = hasDirty; }

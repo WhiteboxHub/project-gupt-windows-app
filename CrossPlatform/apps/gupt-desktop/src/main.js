@@ -961,16 +961,13 @@ setInterval(() => {
     return;
   }
   const now = Date.now();
-  if (lastFrameReceivedAt > 0 && now - lastFrameReceivedAt > 2200) {
+  if (lastFrameReceivedAt > 0 && now - lastFrameReceivedAt > 3500) {
     const elapsedSec = Math.round((now - lastFrameReceivedAt) / 1000);
     if (freezeBanner) {
       if (freezeBannerText) {
-        freezeBannerText.textContent = `Connection stalled — no video received for ${elapsedSec}s`;
+        freezeBannerText.textContent = `Stream paused — no video updates for ${elapsedSec}s`;
       }
       freezeBanner.hidden = false;
-    }
-    if (streamStatus) {
-      streamStatus.textContent = `Stalled (${elapsedSec}s)`;
     }
   } else {
     if (freezeBanner) freezeBanner.hidden = true;
