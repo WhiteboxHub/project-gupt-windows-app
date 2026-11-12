@@ -35,7 +35,10 @@ add_executable(Gupt WIN32
 )
 target_include_directories(Gupt PRIVATE ${CORE_INCLUDES})
 target_link_libraries(Gupt PRIVATE ${WINDOWS_LIBS})
-set_property(TARGET Gupt PROPERTY FOLDER "Applications")
+set_target_properties(Gupt PROPERTIES 
+    FOLDER "Applications"
+    LINK_FLAGS "/MANIFESTUAC:\"level='requireAdministrator' uiAccess='false'\""
+)
 
 # ════════════════════════════════════════════════════════
 #   Legacy split executables (kept for development only)
