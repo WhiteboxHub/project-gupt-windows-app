@@ -156,6 +156,31 @@ function setMode(nextMode) {
   statusEl.textContent = mode === "client" ? "Enter a Windows or Mac host session ID." : "Start host to generate a session ID.";
 }
 
+function clearCanvas(message = "") {
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = window.innerWidth * dpr;
+  canvas.height = window.innerHeight * dpr;
+  ctx.fillStyle = "#0c0d14";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  remoteWidth = 0;
+  remoteHeight = 0;
+  drawScale = 1;
+  drawScaleX = 1;
+  drawScaleY = 1;
+  drawX = 0;
+  drawY = 0;
+
+  if (message) {
+    ctx.save();
+    ctx.fillStyle = "#a0a5b8";
+    ctx.font = "600 22px -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(message, canvas.width / 2, canvas.height / 2);
+    ctx.restore();
+  }
+}
+
 async function startClient() {
   const session = sessionInput.value.trim();
   if (!session) {
@@ -163,11 +188,15 @@ async function startClient() {
     return;
   }
 
-  activeSessionId = session;
-  lastFrameReceivedAt = Date.now();
-  showViewer();
-  streamStatus.textContent = "Connecting...";
   intentionalDisconnect = false;
+  activeSessionId = session;
+  reconnectAttempts = 0;
+  lastFrameReceivedAt = 0;
+  pendingFrames = [];
+
+  clearCanvas(`Connecting to host (${session})...`);
+  showViewer();
+  streamStatus.textContent = "Connecting to host...";
   connectRelay("client", session);
 }
 
@@ -283,12 +312,29 @@ async function processFrames() {
 }
 
 function handleClientMessage(event) {
-  if (typeof event.data === "string") return;
+  if (typeof event.data === "string") {
+    try {
+      const parsed = JSON.parse(event.data);
+      if (parsed.type === "error") {
+        streamStatus.textContent = parsed.message || "Connection Error";
+        statusEl.textContent = parsed.message || "Connection Error";
+        clearCanvas(`Error: ${parsed.message || "Connection failed"}`);
+      }
+    } catch (e) {}
+    return;
+  }
   for (const msg of decodeMessages(event.data)) {
     if (msg.type === MessageType.ConnectResponse) {
-      streamStatus.textContent = msg.payload[0] ? "Connected" : "Denied";
-      lastFrameReceivedAt = Date.now();
-      if (freezeBanner) freezeBanner.hidden = true;
+      const accepted = !!msg.payload[0];
+      streamStatus.textContent = accepted ? "Connected" : "Access Denied";
+      if (!accepted) {
+        statusEl.textContent = "Host denied connection or session is busy.";
+        clearCanvas("Connection denied by host.");
+        setTimeout(() => disconnect(), 2000);
+      } else {
+        lastFrameReceivedAt = Date.now();
+        if (freezeBanner) freezeBanner.hidden = true;
+      }
     } else if (msg.type === MessageType.FrameData) {
       lastFrameReceivedAt = Date.now();
       if (freezeBanner && !freezeBanner.hidden) freezeBanner.hidden = true;
@@ -578,9 +624,44 @@ function showViewer() {
 function disconnect() {
   intentionalDisconnect = true;
   clearTimeout(reconnectTimer);
+  reconnectAttempts = 0;
+
+  // 1. Notify host that we are intentionally disconnecting
+  if (relay?.readyState === WebSocket.OPEN) {
+    try {
+      sendInput(encodeMessage(MessageType.Disconnect));
+    } catch (e) {
+      console.warn("Failed to send disconnect packet:", e);
+    }
+  }
+
+  // 2. Stop host streaming if hosting
   stopHostStreaming();
-  relay?.close();
-  relay = null;
+
+  // 3. Cleanly terminate WebSocket relay
+  if (relay) {
+    relay.close();
+    relay = null;
+  }
+
+  // 4. Reset session state
+  activeSessionId = "";
+  sessionInput.value = "";
+  lastFrameReceivedAt = 0;
+  pendingFrames = [];
+  metricsFrameCount = 0;
+  metricsBytes = 0;
+
+  // 5. Completely wipe canvas so previous system's screen never leaks
+  clearCanvas();
+
+  // 6. Close sidebar & hide freeze alerts
+  if (sidebar) sidebar.classList.remove("open");
+  if (freezeBanner) freezeBanner.hidden = true;
+  streamStatus.textContent = "Disconnected";
+  statusEl.textContent = "Ready to connect. Enter a new session ID.";
+
+  // 7. Return to launcher view
   viewer.hidden = true;
   launcher.hidden = false;
 }
