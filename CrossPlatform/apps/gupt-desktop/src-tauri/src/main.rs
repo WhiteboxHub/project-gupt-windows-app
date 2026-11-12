@@ -219,6 +219,47 @@ fn save_error_report(
     Ok(log_path.display().to_string())
 }
 
+#[tauri::command]
+fn read_clipboard() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+        let output = Command::new("pbpaste")
+            .output()
+            .map_err(|e| format!("Failed to run pbpaste: {e}"))?;
+        if output.status.success() {
+            return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+        }
+        return Ok(String::new());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(String::new())
+    }
+}
+
+#[tauri::command]
+fn write_clipboard(text: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("pbcopy")
+            .stdin(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn pbcopy: {e}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+        return Ok(());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(())
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -226,7 +267,9 @@ fn main() {
             inject_input_preview,
             inject_mouse,
             inject_keyboard,
-            save_error_report
+            save_error_report,
+            read_clipboard,
+            write_clipboard
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Gupt desktop app");

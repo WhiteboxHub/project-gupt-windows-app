@@ -59,28 +59,23 @@ export function encodeKeyboard(virtualKey, isDown) {
 
 const CLIPBOARD_TEXT_PREFIX = "GUPT_CLIPBOARD_TEXT_V1\n";
 
-export function encodeClipboardText(text, transferMode = "manual") {
-  const mode = transferMode === "auto" ? "auto" : "manual";
-  const body = `${CLIPBOARD_TEXT_PREFIX}${mode}\n${String(text ?? "")}`;
-  return encodeMessage(MessageType.ClipboardText, new TextEncoder().encode(body));
+export function encodeClipboardText(text) {
+  // Pure UTF-8 payload matching native Windows and Mac Protocol
+  return encodeMessage(MessageType.ClipboardText, new TextEncoder().encode(String(text ?? "")));
 }
 
 export function decodeClipboardText(payload) {
-  const body = new TextDecoder().decode(payload);
-  if (!body.startsWith(CLIPBOARD_TEXT_PREFIX)) {
-    return { text: body, transferMode: "manual" };
+  let body = new TextDecoder().decode(payload);
+  if (body.startsWith(CLIPBOARD_TEXT_PREFIX)) {
+    const rest = body.slice(CLIPBOARD_TEXT_PREFIX.length);
+    const separator = rest.indexOf("\n");
+    if (separator !== -1) {
+      body = rest.slice(separator + 1);
+    }
   }
-
-  const rest = body.slice(CLIPBOARD_TEXT_PREFIX.length);
-  const separator = rest.indexOf("\n");
-  if (separator === -1) {
-    return { text: "", transferMode: "manual" };
-  }
-
-  const transferMode = rest.slice(0, separator) === "auto" ? "auto" : "manual";
   return {
-    text: rest.slice(separator + 1),
-    transferMode,
+    text: body,
+    transferMode: "auto",
   };
 }
 

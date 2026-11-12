@@ -113,7 +113,7 @@ let reconnectTimer = null;
 let viewMode = "contain";
 let streamScale = 1;
 let lastErrorReportAt = 0;
-let clipboardSyncEnabled = false;
+let clipboardSyncEnabled = true;
 let lastLocalClipboardText = "";
 let lastRemoteClipboardText = "";
 let isPollingClipboard = false;
@@ -716,20 +716,59 @@ function encodeBrowserFrame(width, height, jpeg) {
   return encodeMessage(MessageType.FrameData, payload);
 }
 
-function sendClipboardTextValue(text, transferMode = "auto") {
+async function readLocalClipboard() {
+  if (window.__TAURI__?.core?.invoke) {
+    try {
+      return await window.__TAURI__.core.invoke("read_clipboard");
+    } catch (e) {
+      console.warn("Tauri read_clipboard failed:", e);
+    }
+  }
+  if (navigator.clipboard?.readText) {
+    try {
+      return await navigator.clipboard.readText();
+    } catch (e) {
+      // ignore
+    }
+  }
+  return null;
+}
+
+async function writeLocalClipboard(text) {
+  if (window.__TAURI__?.core?.invoke) {
+    try {
+      await window.__TAURI__.core.invoke("write_clipboard", { text });
+      return true;
+    } catch (e) {
+      console.warn("Tauri write_clipboard failed:", e);
+    }
+  }
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (e) {
+      console.warn("navigator.clipboard.writeText failed:", e);
+    }
+  }
+  return false;
+}
+
+function sendClipboardTextValue(text) {
   lastLocalClipboardText = text;
-  sendInput(encodeClipboardText(text, transferMode));
+  sendInput(encodeClipboardText(text));
 }
 
 async function receiveClipboardText(payload, options = {}) {
   try {
-    const { text, transferMode } = decodeClipboardText(payload);
-    if ((options.automatic || transferMode === "auto") && !clipboardSyncEnabled) return;
+    const { text } = decodeClipboardText(payload);
+    if (!clipboardSyncEnabled || !text) return;
+    if (text === lastRemoteClipboardText || text === lastLocalClipboardText) return;
 
     lastRemoteClipboardText = text;
     lastLocalClipboardText = text;
-    await navigator.clipboard.writeText(text);
-    streamStatus.textContent = transferMode === "auto" ? "Clipboard synced" : "Clipboard received";
+    await writeLocalClipboard(text);
+    console.log("[CLIPBOARD] Synced from remote, length:", text.length);
   } catch (err) {
     reportError("clipboard-receive", err);
   }
@@ -740,14 +779,13 @@ async function pollClipboardSync(options = {}) {
 
   isPollingClipboard = true;
   try {
-    const text = await navigator.clipboard.readText();
-    if (text !== lastLocalClipboardText && text !== lastRemoteClipboardText) {
-      sendClipboardTextValue(text, "auto");
-      streamStatus.textContent = "Clipboard synced";
+    const text = await readLocalClipboard();
+    if (text !== null && text !== "" && text !== lastLocalClipboardText && text !== lastRemoteClipboardText) {
+      lastLocalClipboardText = text;
+      sendClipboardTextValue(text);
+      console.log("[CLIPBOARD] Sent local clipboard to remote, length:", text.length);
     }
-    lastLocalClipboardText = text;
   } catch (err) {
-    streamStatus.textContent = "Clipboard permission needed";
     if (options.reportBlocked) {
       reportError("clipboard-sync-poll", err);
     }

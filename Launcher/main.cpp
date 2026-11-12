@@ -261,6 +261,33 @@ std::string GetClipboardText() {
     CloseClipboard(); return res;
 }
 
+void SetHostClipboardText(std::string s) {
+    if (s.rfind("GUPT_CLIPBOARD_TEXT_V1\n", 0) == 0) {
+        size_t nl = s.find('\n', 23);
+        if (nl != std::string::npos) s = s.substr(nl + 1);
+    }
+    {
+        std::lock_guard<std::mutex> lk(g_hostClipMtx);
+        g_lastFromClient = s;
+    }
+    int wn = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, 0, 0);
+    if (wn > 0) {
+        HGLOBAL m = GlobalAlloc(GMEM_MOVEABLE, wn * sizeof(wchar_t));
+        if (m) {
+            wchar_t* d = (wchar_t*)GlobalLock(m);
+            MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, d, wn);
+            GlobalUnlock(m);
+            if (OpenClipboard(NULL)) {
+                EmptyClipboard();
+                SetClipboardData(CF_UNICODETEXT, m);
+                CloseClipboard();
+            } else {
+                GlobalFree(m);
+            }
+        }
+    }
+}
+
 static std::vector<uint8_t> MakeConnectRequest() {
     gupt::shared::ConnectRequest req = {};
     strncpy(req.sessionId, g_CurrentSessionId.empty() ? "GUPT_SESSION" : g_CurrentSessionId.c_str(), sizeof(req.sessionId) - 1);
@@ -313,9 +340,7 @@ static void RunHostMode() {
                 else if(t == shared::MessageType::MouseEvent) { injector.IngestMouseEvent(*reinterpret_cast<const shared::MouseEvent*>(p.data())); }
                 else if(t == shared::MessageType::KeyboardEvent) { injector.IngestKeyboardEvent(*reinterpret_cast<const shared::KeyboardEvent*>(p.data())); }
                 else if(g_ClipboardSyncEnabled && t == shared::MessageType::ClipboardText){ 
-                    std::string s((char*)p.data(),p.size()); {std::lock_guard<std::mutex> lk(g_hostClipMtx); g_lastFromClient=s;} 
-                    int wn=MultiByteToWideChar(CP_UTF8,0,s.c_str(),-1,0,0); 
-                    if(wn>0){ HGLOBAL m=GlobalAlloc(GMEM_MOVEABLE,wn*sizeof(wchar_t)); wchar_t* d=(wchar_t*)GlobalLock(m); MultiByteToWideChar(CP_UTF8,0,s.c_str(),-1,d,wn); GlobalUnlock(m); if(OpenClipboard(NULL)){EmptyClipboard();SetClipboardData(CF_UNICODETEXT,m);CloseClipboard();} } 
+                    SetHostClipboardText(std::string((char*)p.data(), p.size()));
                 }
             }
         }
@@ -340,7 +365,7 @@ static void RunHostMode() {
         }
         else if(t==shared::MessageType::MouseEvent) { injector.IngestMouseEvent(*reinterpret_cast<const shared::MouseEvent*>(p.data())); }
         else if(t==shared::MessageType::KeyboardEvent) { injector.IngestKeyboardEvent(*reinterpret_cast<const shared::KeyboardEvent*>(p.data())); }
-        else if(g_ClipboardSyncEnabled && t==shared::MessageType::ClipboardText){ std::string s((char*)p.data(),p.size()); {std::lock_guard<std::mutex> lk(g_hostClipMtx); g_lastFromClient=s;} int wn=MultiByteToWideChar(CP_UTF8,0,s.c_str(),-1,0,0); if(wn>0){ HGLOBAL m=GlobalAlloc(GMEM_MOVEABLE,wn*sizeof(wchar_t)); wchar_t* d=(wchar_t*)GlobalLock(m); MultiByteToWideChar(CP_UTF8,0,s.c_str(),-1,d,wn); GlobalUnlock(m); if(OpenClipboard(NULL)){EmptyClipboard();SetClipboardData(CF_UNICODETEXT,m);CloseClipboard();} } }
+        else if(g_ClipboardSyncEnabled && t==shared::MessageType::ClipboardText){ SetHostClipboardText(std::string((char*)p.data(), p.size())); }
     });
     
     std::thread(HostEncoderLoop, &capturer).detach();
