@@ -13,7 +13,7 @@ AudioPlayer::~AudioPlayer() {
 }
 
 bool AudioPlayer::Initialize(uint32_t sampleRate, uint16_t channels, uint16_t bits) {
-    std::lock_guard<std::mutex> lk(m_Mtx);
+    std::lock_guard<std::recursive_mutex> lk(m_Mtx);
 
     if (m_hWaveOut && m_CurrentSampleRate == sampleRate && m_CurrentChannels == channels) {
         return true;
@@ -109,7 +109,7 @@ void AudioPlayer::PlaySamples(const int16_t* samples, size_t sampleCount, uint32
         Initialize(sampleRate, channels, 16);
     }
 
-    std::lock_guard<std::mutex> lk(m_Mtx);
+    std::lock_guard<std::recursive_mutex> lk(m_Mtx);
     if (!m_hWaveOut) {
         if (!Initialize(m_CurrentSampleRate ? m_CurrentSampleRate : 48000,
                         m_CurrentChannels ? m_CurrentChannels : 2, 16)) {
@@ -167,7 +167,7 @@ void AudioPlayer::CleanupBuffers() {
 }
 
 void AudioPlayer::Stop() {
-    std::lock_guard<std::mutex> lk(m_Mtx);
+    std::lock_guard<std::recursive_mutex> lk(m_Mtx);
     if (m_hWaveOut) {
         waveOutReset(m_hWaveOut);
         CleanupBuffers();

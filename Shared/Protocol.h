@@ -15,11 +15,17 @@ enum class MessageType : uint8_t {
     KeyboardEvent = 5,
     Heartbeat = 6,
     Disconnect = 7,
-    ClipboardText = 8,  // UTF-8 clipboard text sync
-    ClipboardImage = 9, // Binary clipboard Image (BMP/DIB) sync
+    ClipboardText = 8,   // UTF-8 clipboard text sync
+    ClipboardImage = 9,  // Binary clipboard Image (BMP/DIB) sync
     RefreshRequest = 10, // Client request to reload / force full keyframe refresh
     FrameAck = 11,       // Client ACK to pace frame delivery and prevent bufferbloat
-    AudioData = 12       // High-fidelity PCM stereo/mono audio stream
+    AudioData = 12,      // High-fidelity PCM stereo/mono audio stream
+    P2PCandidate = 13,   // Direct P2P NAT candidate endpoint exchange
+    SwitchMonitor = 14,  // Request host to switch active capture monitor
+    SecureDesktopNotification = 15, // Host notifying client that UAC / Secure Desktop is active
+    KeyExchange = 16,    // Ephemeral ECDH P-256 X9.63 public key exchange for E2EE
+    EncryptedPayload = 17, // AES-256-GCM authenticated encrypted payload wrapper
+    MonitorInfo = 18     // Host reporting active monitor index and total display count
 };
 
 #pragma pack(push, 1) // Ensure no padding for raw struct serialization
@@ -75,6 +81,31 @@ struct AudioDataHeader {
 
 struct FrameAck {
     uint32_t frameNumber;
+};
+
+struct P2PCandidateMsg {
+    char publicIp[64];
+    uint16_t publicPort;
+    char localIp[64];
+    uint16_t localPort;
+};
+
+struct SwitchMonitorMsg {
+    uint32_t monitorIndex;
+};
+
+struct SecureDesktopMsg {
+    bool isSecureDesktopActive;
+};
+
+struct KeyExchangeMsg {
+    uint8_t publicKeyLen;
+    uint8_t publicKey[96];
+};
+
+struct MonitorInfoMsg {
+    uint32_t activeIndex;
+    uint32_t monitorCount;
 };
 
 #pragma pack(pop)
@@ -136,6 +167,17 @@ std::vector<uint8_t> SerializeMessage(MessageType type, const T& payload) {
     return buffer;
 }
 
+inline std::vector<uint8_t> SerializeRawMessage(MessageType type, const uint8_t* data, uint32_t size) {
+    std::vector<uint8_t> buffer(sizeof(MessageHeader) + size);
+    MessageHeader* header = reinterpret_cast<MessageHeader*>(buffer.data());
+    header->type = type;
+    header->payloadSize = size;
+    if (size > 0 && data) {
+        std::memcpy(buffer.data() + sizeof(MessageHeader), data, size);
+    }
+    return buffer;
+}
+
 // Overload for FrameData where payload comprises a header and arbitrary byte array
 inline std::vector<uint8_t> SerializeFrame(const FrameDataHeader& frameInfo, const std::vector<uint8_t>& frameData) {
     uint32_t payloadSize = sizeof(FrameDataHeader) + frameData.size();
@@ -151,7 +193,6 @@ inline std::vector<uint8_t> SerializeFrame(const FrameDataHeader& frameInfo, con
     return buffer;
 }
 
-
 // Parse a raw byte buffer into a list of (MessageType, payload) pairs
 inline std::vector<std::pair<MessageType, std::vector<uint8_t>>>
 DeserializeMessages(const std::vector<uint8_t>& data) {
@@ -160,7 +201,7 @@ DeserializeMessages(const std::vector<uint8_t>& data) {
     while (offset + sizeof(MessageHeader) <= data.size()) {
         const MessageHeader* hdr = reinterpret_cast<const MessageHeader*>(data.data() + offset);
         uint8_t t = static_cast<uint8_t>(hdr->type);
-        if (t < 1 || t > 12) {
+        if (t < 1 || t > 18) {
             offset++;
             continue;
         }

@@ -26,7 +26,7 @@ private:
     HWAVEOUT m_hWaveOut = nullptr;
     uint32_t m_CurrentSampleRate = 0;
     uint16_t m_CurrentChannels = 0;
-    std::mutex m_Mtx;
+    std::recursive_mutex m_Mtx;
 
     static const int NUM_BUFFERS = 32;
     struct BufferSlot {

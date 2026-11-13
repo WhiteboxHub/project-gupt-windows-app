@@ -152,7 +152,33 @@ void ScreenCapturer::Reset() {
     CleanupGdi();
 }
 
-bool ScreenCapturer::Initialize() {
+uint32_t ScreenCapturer::GetMonitorCount() {
+    ComPtr<ID3D11Device> dev;
+    ComPtr<ID3D11DeviceContext> ctx;
+    D3D_FEATURE_LEVEL fl;
+    if (FAILED(D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, NULL, 0, D3D11_SDK_VERSION, &dev, &fl, &ctx)) || !dev) {
+        return 1;
+    }
+    ComPtr<IDXGIDevice> dxgiDevice;
+    if (FAILED(dev.As(&dxgiDevice))) return 1;
+    ComPtr<IDXGIAdapter> adapter;
+    if (FAILED(dxgiDevice->GetParent(IID_PPV_ARGS(&adapter)))) return 1;
+
+    uint32_t count = 0;
+    ComPtr<IDXGIOutput> out;
+    while (SUCCEEDED(adapter->EnumOutputs(count, &out))) {
+        count++;
+        out.Reset();
+    }
+    return (count > 0) ? count : 1;
+}
+
+bool ScreenCapturer::SetMonitorIndex(uint32_t index) {
+    return Initialize(index);
+}
+
+bool ScreenCapturer::Initialize(uint32_t monitorIndex) {
+    m_SelectedOutputIndex = monitorIndex;
     Reset();
 
     // Attach to current active input desktop (handles Task Manager, UAC, desktop switch)
@@ -168,17 +194,45 @@ bool ScreenCapturer::Initialize() {
     if (!m_Device) return false;
     ComPtr<IDXGIDevice> dxgiDevice; if (FAILED(m_Device.As(&dxgiDevice))) return false;
     ComPtr<IDXGIAdapter> adapter; if (FAILED(dxgiDevice->GetParent(IID_PPV_ARGS(&adapter)))) return false;
-    ComPtr<IDXGIOutput> output; if (FAILED(adapter->EnumOutputs(0, &output))) return false;
+    ComPtr<IDXGIOutput> output;
+    if (FAILED(adapter->EnumOutputs(m_SelectedOutputIndex, &output))) {
+        if (m_SelectedOutputIndex != 0 && SUCCEEDED(adapter->EnumOutputs(0, &output))) {
+            m_SelectedOutputIndex = 0;
+        } else {
+            return false;
+        }
+    }
     ComPtr<IDXGIOutput1> output1; if (FAILED(output.As(&output1))) return false;
+    DXGI_OUTPUT_DESC outDesc{};
+    if (SUCCEEDED(output->GetDesc(&outDesc))) {
+        m_MonitorBounds = outDesc.DesktopCoordinates;
+    }
     if (FAILED(output1->DuplicateOutput(m_Device.Get(), &m_DeskDupl))) return false;
     DXGI_OUTDUPL_DESC desc; m_DeskDupl->GetDesc(&desc);
     m_Width = desc.ModeDesc.Width; m_Height = desc.ModeDesc.Height;
+    if (m_MonitorBounds.right <= m_MonitorBounds.left || m_MonitorBounds.bottom <= m_MonitorBounds.top) {
+        m_MonitorBounds = { 0, 0, static_cast<LONG>(m_Width), static_cast<LONG>(m_Height) };
+    }
     return true;
 }
 
+void ScreenCapturer::GetMonitorBounds(int32_t& left, int32_t& top, int32_t& width, int32_t& height) const {
+    if (m_MonitorBounds.right > m_MonitorBounds.left && m_MonitorBounds.bottom > m_MonitorBounds.top) {
+        left = m_MonitorBounds.left;
+        top = m_MonitorBounds.top;
+        width = m_MonitorBounds.right - m_MonitorBounds.left;
+        height = m_MonitorBounds.bottom - m_MonitorBounds.top;
+    } else {
+        left = 0;
+        top = 0;
+        width = (m_Width > 0) ? static_cast<int32_t>(m_Width) : GetSystemMetrics(SM_CXSCREEN);
+        height = (m_Height > 0) ? static_cast<int32_t>(m_Height) : GetSystemMetrics(SM_CYSCREEN);
+    }
+}
+
 bool ScreenCapturer::CaptureNextFrameGdi(std::vector<uint8_t>& outPixels, uint32_t& outWidth, uint32_t& outHeight) {
-    int w = GetSystemMetrics(SM_CXSCREEN);
-    int h = GetSystemMetrics(SM_CYSCREEN);
+    int32_t ox = 0, oy = 0, w = 0, h = 0;
+    GetMonitorBounds(ox, oy, w, h);
     if (w <= 0 || h <= 0) return false;
 
     if (!m_hGdiMemDC || !m_hGdiBitmap || m_GdiWidth != w || m_GdiHeight != h) {
@@ -210,7 +264,7 @@ bool ScreenCapturer::CaptureNextFrameGdi(std::vector<uint8_t>& outPixels, uint32
         m_GdiHeight = h;
     }
 
-    if (!BitBlt(m_hGdiMemDC, 0, 0, w, h, m_hGdiScreenDC, 0, 0, SRCCOPY)) {
+    if (!BitBlt(m_hGdiMemDC, 0, 0, w, h, m_hGdiScreenDC, ox, oy, SRCCOPY)) {
         CleanupGdi();
         return false;
     }
@@ -283,16 +337,36 @@ bool ScreenCapturer::CaptureNextFrame(std::vector<uint8_t>& outPixels, uint32_t&
             return true;
         }
 
-        // Periodic keep-alive frame for static screens (ensures client always receives a crisp frame)
-        if (now - m_LastForceCaptureTick > 1500 && !m_CachedFrame.empty() && m_Width > 0 && m_Height > 0) {
-            m_LastForceCaptureTick = now;
-            outWidth = m_Width;
-            outHeight = m_Height;
-            outPixels = m_CachedFrame;
-            m_HasLastDirtyBounds = true;
-            m_LastDirtyBounds = { 0, 0, static_cast<LONG>(outWidth), static_cast<LONG>(outHeight) };
-            if (m_DrawCursor) { DrawCursorOntoFrame(outPixels, outWidth, outHeight, m_LastDirtyBounds, m_HasLastDirtyBounds); }
-            return true;
+        // Keyframe request (on connect / refresh) or periodic keep-alive for static screens
+        bool needKeyframe = m_ForceKeyframe.exchange(false);
+        if ((needKeyframe || (now - m_LastForceCaptureTick > 1500))) {
+            if (!m_CachedFrame.empty() && m_Width > 0 && m_Height > 0) {
+                m_LastForceCaptureTick = now;
+                outWidth = m_Width;
+                outHeight = m_Height;
+                outPixels = m_CachedFrame;
+                m_HasLastDirtyBounds = true;
+                m_LastDirtyBounds = { 0, 0, static_cast<LONG>(outWidth), static_cast<LONG>(outHeight) };
+                if (m_DrawCursor) { DrawCursorOntoFrame(outPixels, outWidth, outHeight, m_LastDirtyBounds, m_HasLastDirtyBounds); }
+                return true;
+            } else {
+                std::vector<uint8_t> gdiFrame;
+                uint32_t gw = 0, gh = 0;
+                if (CaptureNextFrameGdi(gdiFrame, gw, gh)) {
+                    m_LastCursorPos = curPt;
+                    m_LastForceCaptureTick = now;
+                    m_CachedFrame = gdiFrame;
+                    m_Width = gw;
+                    m_Height = gh;
+                    outPixels = std::move(gdiFrame);
+                    outWidth = gw;
+                    outHeight = gh;
+                    m_HasLastDirtyBounds = true;
+                    m_LastDirtyBounds = { 0, 0, static_cast<LONG>(outWidth), static_cast<LONG>(outHeight) };
+                    if (m_DrawCursor) { DrawCursorOntoFrame(outPixels, outWidth, outHeight, m_LastDirtyBounds, m_HasLastDirtyBounds); }
+                    return true;
+                }
+            }
         }
 
         return false;
@@ -302,7 +376,7 @@ bool ScreenCapturer::CaptureNextFrame(std::vector<uint8_t>& outPixels, uint32_t&
         // Desktop switch, resolution change, or lock screen
         Reset();
         Sleep(50);
-        Initialize();
+        Initialize(m_SelectedOutputIndex);
         return false;
     }
 
@@ -483,14 +557,11 @@ bool ScreenCapturer::CaptureRegionJpeg(const std::vector<uint8_t>& rawPixels, ui
     vals[0].vt = VT_R4;
     vals[0].fltVal = quality / 100.0f;
 
-    if (force444) {
-        opts[1].pstrName = (LPOLESTR)L"JpegYCrCbSubsampling";
-        vals[1].vt = VT_UI1;
-        vals[1].bVal = 0x02; // 4:4:4
-        if (pProp) pProp->Write(2, opts, vals);
-    } else {
-        if (pProp) pProp->Write(1, opts, vals);
-    }
+    opts[1].pstrName = (LPOLESTR)L"JpegYCrCbSubsampling";
+    vals[1].vt = VT_UI1;
+    // 0x01 = WICJpegYCrCbSubsampling420 (4:2:0 Subsampling), 0x03 = WICJpegYCrCbSubsampling444
+    vals[1].bVal = force444 ? static_cast<BYTE>(WICJpegYCrCbSubsampling444) : static_cast<BYTE>(WICJpegYCrCbSubsampling420);
+    if (pProp) pProp->Write(2, opts, vals);
 
     if (FAILED(pFrame->Initialize(pProp))) {
         if (pProp) pProp->Release();
