@@ -121,6 +121,7 @@ static void PushOutbound(std::vector<uint8_t> f, bool isUrgent) {
 }
 
 static void HostEncoderLoop(gupt::core::capture::ScreenCapturer* capturer) {
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
     int frameCounter = 0;
     while(true) {
         std::vector<uint8_t> raw; uint32_t w, h;
@@ -290,9 +291,10 @@ void SetHostClipboardText(std::string s) {
     }
 }
 
-static std::vector<uint8_t> MakeConnectRequest() {
+static std::vector<uint8_t> MakeConnectRequest(const std::string& session = "") {
     gupt::shared::ConnectRequest req = {};
-    strncpy(req.sessionId, g_CurrentSessionId.empty() ? "GUPT_SESSION" : g_CurrentSessionId.c_str(), sizeof(req.sessionId) - 1);
+    std::string s = !session.empty() ? session : (!g_CurrentSessionId.empty() ? g_CurrentSessionId : "GUPT_SESSION");
+    strncpy(req.sessionId, s.c_str(), sizeof(req.sessionId) - 1);
     strncpy(req.authenticationToken, "GUPT_LOCAL_TOKEN", sizeof(req.authenticationToken) - 1);
     return gupt::shared::SerializeMessage(gupt::shared::MessageType::ConnectRequest, req);
 }
@@ -467,7 +469,7 @@ LRESULT CALLBACK ClientWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
                     if(!actualIp.empty() && g_Client.Connect(actualIp, 8080)){
                         g_UsingRelay = false;
                         SetWindowTextA(hWnd, "Gupt - Waiting for host approval (LAN)");
-                        auto req = MakeConnectRequest();
+                        auto req = MakeConnectRequest(session);
                         g_Client.SendRaw(req);
                         while(g_Client.IsConnected()){Sleep(250);}
                         g_IsConnected = false;
@@ -478,9 +480,23 @@ LRESULT CALLBACK ClientWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
 
                     if(g_Relay.Open(g_SignalingHost, g_SignalingPort, rp, g_SignalingPort==443)){
                         g_UsingRelay = true; 
-                        auto req = MakeConnectRequest();
+                        auto req = MakeConnectRequest(session);
                         g_Relay.Send(req.data(), (uint32_t)req.size());
-                        bool verified = false; for(int i=0; i<100 && !verified; ++i){ auto d = g_Relay.Recv(); if(d.empty()){ Sleep(100); continue; } auto msgs = gupt::shared::DeserializeMessages(d); for(auto& m : msgs) if(m.first == gupt::shared::MessageType::ConnectResponse) verified = true; }
+                        bool verified = false; 
+                        for(int i=0; i<100 && !verified; ++i){ 
+                            auto d = g_Relay.Recv(); 
+                            if(d.empty()){ Sleep(100); continue; } 
+                            auto msgs = gupt::shared::DeserializeMessages(d); 
+                            for(auto& m : msgs) {
+                                if(m.first == gupt::shared::MessageType::ConnectResponse) {
+                                    if(!m.second.empty() && m.second[0] != 0) verified = true;
+                                } else if(m.first == gupt::shared::MessageType::FrameData) {
+                                    verified = true;
+                                    ProcessFrame(m.second, hWnd);
+                                    PushEv({0xFF});
+                                }
+                            }
+                        }
                         if(verified){
                             g_IsConnected = true; SetWindowTextA(hWnd, "Gupt - Connected (Relay)");
                             while(g_IsConnected){

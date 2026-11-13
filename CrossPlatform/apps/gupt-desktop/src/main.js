@@ -117,6 +117,7 @@ let clipboardSyncEnabled = true;
 let lastLocalClipboardText = "";
 let lastRemoteClipboardText = "";
 let isPollingClipboard = false;
+let isSessionConnected = false;
 
 clientModeBtn.addEventListener("click", () => setMode("client"));
 hostModeBtn.addEventListener("click", () => setMode("host"));
@@ -189,6 +190,7 @@ async function startClient() {
   }
 
   intentionalDisconnect = false;
+  isSessionConnected = false;
   activeSessionId = session;
   reconnectAttempts = 0;
   lastFrameReceivedAt = 0;
@@ -266,6 +268,7 @@ function connectRelay(role, session) {
 }
 
 function handleRelayClose(role, session) {
+  isSessionConnected = false;
   if (intentionalDisconnect) {
     if (role === "host") stopHostStreaming();
     if (role === "client") streamStatus.textContent = "Disconnected";
@@ -326,6 +329,7 @@ function handleClientMessage(event) {
   for (const msg of decodeMessages(event.data)) {
     if (msg.type === MessageType.ConnectResponse) {
       const accepted = !!msg.payload[0];
+      isSessionConnected = accepted;
       streamStatus.textContent = accepted ? "Connected" : "Access Denied";
       if (!accepted) {
         statusEl.textContent = "Host denied connection or session is busy.";
@@ -336,6 +340,7 @@ function handleClientMessage(event) {
         if (freezeBanner) freezeBanner.hidden = true;
       }
     } else if (msg.type === MessageType.FrameData) {
+      isSessionConnected = true;
       lastFrameReceivedAt = Date.now();
       if (freezeBanner && !freezeBanner.hidden) freezeBanner.hidden = true;
 
@@ -407,14 +412,26 @@ function handleHostMessage(event) {
         const button = view.getUint8(8);
         const isDown = view.getUint8(9) !== 0;
         const wheelDelta = view.getInt32(10, true);
-        processMouseInjection({ x, y, button, isDown, wheelDelta });
+        processMouseInjection({
+          x,
+          y,
+          button,
+          is_down: isDown,
+          isDown,
+          wheel_delta: wheelDelta,
+          wheelDelta,
+        });
       }
     } else if (msg.type === MessageType.KeyboardEvent) {
       if (window.__TAURI__ && window.__TAURI__.core) {
         const view = new DataView(msg.payload.buffer, msg.payload.byteOffset, msg.payload.byteLength);
         const keycode = view.getUint16(0, true);
         const isDown = view.getUint8(2) !== 0;
-        window.__TAURI__.core.invoke("inject_keyboard", { keycode, isDown }).catch((err) => {
+        window.__TAURI__.core.invoke("inject_keyboard", {
+          keycode,
+          is_down: isDown,
+          isDown,
+        }).catch((err) => {
           console.error(err);
           reportError("host-inject-keyboard", err);
         });
@@ -433,7 +450,7 @@ let metricsLatency = 0;
 let metricsBitrate = "0.0";
 
 function updateMetricsDisplay() {
-  if (viewer.hidden || !streamStatus) return;
+  if (viewer.hidden || !streamStatus || !isSessionConnected) return;
   const latencyStr = metricsLatency > 0 && metricsLatency < 5000 ? `${metricsLatency}ms` : "<35ms";
   streamStatus.textContent = `Connected (${metricsFps} FPS • ${latencyStr} • ${metricsBitrate} Mbps)`;
 }
@@ -623,6 +640,7 @@ function showViewer() {
 
 function disconnect() {
   intentionalDisconnect = true;
+  isSessionConnected = false;
   clearTimeout(reconnectTimer);
   reconnectAttempts = 0;
 
@@ -956,7 +974,7 @@ setInterval(() => {
 
 // Watchdog to immediately alert user if stream stalls
 setInterval(() => {
-  if (viewer.hidden || relay?.readyState !== WebSocket.OPEN) {
+  if (viewer.hidden || relay?.readyState !== WebSocket.OPEN || !isSessionConnected) {
     if (freezeBanner) freezeBanner.hidden = true;
     return;
   }
