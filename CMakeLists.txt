@@ -49,9 +49,6 @@ target_link_libraries(Gupt PRIVATE ${WINDOWS_LIBS})
 set_target_properties(Gupt PROPERTIES 
     FOLDER "Applications"
     LINK_FLAGS "/MANIFESTUAC:\"level='requireAdministrator' uiAccess='false'\""
-set_property(TARGET Gupt PROPERTY FOLDER "Applications")
-set_target_properties(Gupt PROPERTIES
-    LINK_FLAGS "/MANIFESTUAC:\"level='asInvoker' uiAccess='false'\""
 )
 
 # ════════════════════════════════════════════════════════
