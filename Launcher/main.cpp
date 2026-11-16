@@ -635,10 +635,12 @@ static void HostEncoderLoop(gupt::core::capture::ScreenCapturer* capturer) {
             if (g_UsingRelay || g_UsingP2P) {
                 uint32_t sent = g_HostLastSentFrameNum.load();
                 uint32_t acked = g_HostLastAckedFrameNum.load();
-                uint32_t maxInFlight = g_UsingP2P ? 3 : 2;
+                uint32_t maxInFlight = g_UsingP2P ? 5 : 4;
                 uint64_t nowTick = GetTickCount64();
-                if (sent > acked + maxInFlight && (nowTick - g_HostLastFrameSendTick.load() < 120)) {
-                    Sleep(4);
+                // Flow control: If peer supports ACKs (acked > 0) and has too many in flight, pace gently
+                // Cap throttle at 25ms (allows 40 FPS minimum under high packet loss; never stalls at 8 FPS)
+                if (acked > 0 && sent > acked + maxInFlight && (nowTick - g_HostLastFrameSendTick.load() < 25)) {
+                    Sleep(2);
                     continue;
                 }
             }
@@ -646,8 +648,6 @@ static void HostEncoderLoop(gupt::core::capture::ScreenCapturer* capturer) {
             bool isFullScan = g_ForceFullScan || (now - s_lastFullScanTick > 10000) || !hasDirty || (dw == 0 || dh == 0);
 
             uint32_t targetX = 0, targetY = 0, targetW = w, targetH = h;
-            int quality = 92;
-            bool force444 = true; // True 4K 4:4:4 Chroma Subsampling: eliminates text blur and color bleeding
 
             if (!isFullScan) {
                 // 8-pixel macroblock alignment for optimal JPEG 8x8 DCT blocks
@@ -669,17 +669,20 @@ static void HostEncoderLoop(gupt::core::capture::ScreenCapturer* capturer) {
                     isFullScan = true;
                     s_lastFullScanTick = now;
                     g_ForceFullScan = false;
-                    quality = (g_UsingRelay && !g_UsingP2P) ? 88 : 92;
-                } else {
-                    quality = 92;
                 }
-                force444 = true;
             } else {
                 s_lastFullScanTick = now;
                 g_ForceFullScan = false;
-                quality = (g_UsingRelay && !g_UsingP2P) ? 88 : 92;
-                force444 = true;
             }
+
+            // Dynamic Subsampling & Adaptive Quality:
+            // High-motion or large region updates (>25% screen) use 4:2:0 subsampling (~45KB/frame) for fluid 60 FPS
+            // Small precision text/code regions use true 4:4:4 subsampling at quality 92 for razor-sharp legibility
+            uint64_t regionPixels = static_cast<uint64_t>(targetW) * static_cast<uint64_t>(targetH);
+            uint64_t screenPixels = static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
+            bool videoLike = regionPixels > (screenPixels / 4);
+            int quality = videoLike ? (g_UsingRelay ? 72 : 82) : 92;
+            bool force444 = !videoLike;
 
             std::vector<uint8_t> jpg;
             if(capturer->CaptureRegionJpeg(raw, w, h, targetX, targetY, targetW, targetH, jpg, quality, force444)) {

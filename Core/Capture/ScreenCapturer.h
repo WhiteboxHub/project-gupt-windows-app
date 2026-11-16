@@ -33,8 +33,8 @@ public:
     bool CaptureRegionJpeg(const std::vector<uint8_t>& rawPixels, uint32_t fullWidth, uint32_t fullHeight, uint32_t x, uint32_t y, uint32_t w, uint32_t h, std::vector<uint8_t>& outJpeg, int quality, bool force444 = false);
     void ReleaseFrame();
     void RequestKeyframe() { m_ForceKeyframe.store(true); }
-    void SetDrawCursor(bool enable) { m_DrawCursor = enable; }
-    bool GetDrawCursor() const { return m_DrawCursor; }
+    void SetDrawCursor(bool /*enable*/) { m_DrawCursor = false; }
+    bool GetDrawCursor() const { return false; }
 
 private:
     void CleanupGdi();

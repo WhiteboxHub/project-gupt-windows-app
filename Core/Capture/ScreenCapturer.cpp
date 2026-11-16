@@ -29,85 +29,13 @@ static void UnionDirtyRect(RECT& bounds, bool& hasBounds, const RECT& r, uint32_
     if (clipped.bottom > bounds.bottom) bounds.bottom = clipped.bottom;
 }
 
-static void DrawCursorOntoFrame(std::vector<uint8_t>& outPixels, uint32_t width, uint32_t height, RECT& dirtyBounds, bool& hasDirtyBounds) {
-    CURSORINFO ci = { sizeof(CURSORINFO) };
-    if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING) || !ci.hCursor) return;
-
-    ICONINFO ii = { 0 };
-    if (!GetIconInfo(ci.hCursor, &ii)) return;
-
-    int posX = ci.ptScreenPos.x - ii.xHotspot;
-    int posY = ci.ptScreenPos.y - ii.yHotspot;
-
-    int curW = 32, curH = 32;
-    HDC hdcScreen = GetDC(NULL);
-    if (hdcScreen) {
-        HDC hdcMem = CreateCompatibleDC(hdcScreen);
-        if (hdcMem) {
-            BITMAPINFO bmi = {0};
-            bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-            bmi.bmiHeader.biWidth = curW;
-            bmi.bmiHeader.biHeight = -curH; // top-down
-            bmi.bmiHeader.biPlanes = 1;
-            bmi.bmiHeader.biBitCount = 32;
-            bmi.bmiHeader.biCompression = BI_RGB;
-
-            void* pBits = NULL;
-            HBITMAP hbm = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
-            if (hbm && pBits) {
-                HBITMAP hOld = (HBITMAP)SelectObject(hdcMem, hbm);
-                memset(pBits, 0, curW * curH * 4);
-
-                DrawIconEx(hdcMem, 0, 0, ci.hCursor, curW, curH, 0, NULL, DI_NORMAL);
-
-                const uint32_t* srcBits = reinterpret_cast<const uint32_t*>(pBits);
-                for (int y = 0; y < curH; ++y) {
-                    int dstY = posY + y;
-                    if (dstY < 0 || dstY >= static_cast<int>(height)) continue;
-                    for (int x = 0; x < curW; ++x) {
-                        int dstX = posX + x;
-                        if (dstX < 0 || dstX >= static_cast<int>(width)) continue;
-
-                        uint32_t pixel = srcBits[y * curW + x];
-                        uint8_t a = (pixel >> 24) & 0xFF;
-                        uint8_t r = (pixel >> 16) & 0xFF;
-                        uint8_t g = (pixel >> 8) & 0xFF;
-                        uint8_t b = pixel & 0xFF;
-
-                        if (a > 0 || r > 0 || g > 0 || b > 0) {
-                            size_t dstIdx = (static_cast<size_t>(dstY) * width + dstX) * 4;
-                            if (a == 255 || a == 0) {
-                                outPixels[dstIdx] = b;
-                                outPixels[dstIdx + 1] = g;
-                                outPixels[dstIdx + 2] = r;
-                                outPixels[dstIdx + 3] = 0xFF;
-                            } else {
-                                float alpha = a / 255.0f;
-                                outPixels[dstIdx] = static_cast<uint8_t>(b * alpha + outPixels[dstIdx] * (1.0f - alpha));
-                                outPixels[dstIdx + 1] = static_cast<uint8_t>(g * alpha + outPixels[dstIdx + 1] * (1.0f - alpha));
-                                outPixels[dstIdx + 2] = static_cast<uint8_t>(r * alpha + outPixels[dstIdx + 2] * (1.0f - alpha));
-                                outPixels[dstIdx + 3] = 0xFF;
-                            }
-                        }
-                    }
-                }
-
-                RECT curRect = { posX, posY, posX + curW, posY + curH };
-                UnionDirtyRect(dirtyBounds, hasDirtyBounds, curRect, width, height);
-
-                SelectObject(hdcMem, hOld);
-                DeleteObject(hbm);
-            }
-            DeleteDC(hdcMem);
-        }
-        ReleaseDC(NULL, hdcScreen);
-    }
-
-    if (ii.hbmColor) DeleteObject(ii.hbmColor);
-    if (ii.hbmMask) DeleteObject(ii.hbmMask);
+static void DrawCursorOntoFrame(std::vector<uint8_t>& /*outPixels*/, uint32_t /*width*/, uint32_t /*height*/, RECT& /*dirtyBounds*/, bool& /*hasDirtyBounds*/) {
+    // Zero-latency local cursor architecture (Chrome Remote Desktop standard).
+    // Stamping host cursor onto differential dirty-rect video frames causes duplicate cursor trails.
+    return;
 }
 
-ScreenCapturer::ScreenCapturer() {}
+ScreenCapturer::ScreenCapturer() : m_DrawCursor(false) {}
 ScreenCapturer::~ScreenCapturer() {
     Reset();
     CleanupGdi();

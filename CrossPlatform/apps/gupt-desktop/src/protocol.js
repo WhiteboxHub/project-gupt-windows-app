@@ -8,6 +8,8 @@ export const MessageType = Object.freeze({
   Disconnect: 7,
   ClipboardText: 8,
   ClipboardImage: 9,
+  RefreshRequest: 10,
+  FrameAck: 11,
 });
 
 const HEADER_SIZE = 5;
@@ -35,6 +37,12 @@ export function encodeConnectResponse(accepted, reason = "OK") {
   view.setUint8(0, accepted ? 1 : 0);
   writeAscii(payload, 1, 128, reason);
   return encodeMessage(MessageType.ConnectResponse, payload);
+}
+
+export function encodeFrameAck(frameNumber) {
+  const payload = new Uint8Array(4);
+  new DataView(payload.buffer).setUint32(0, frameNumber, true);
+  return encodeMessage(MessageType.FrameAck, payload);
 }
 
 export function encodeMouseMove(normalizedX, normalizedY) {

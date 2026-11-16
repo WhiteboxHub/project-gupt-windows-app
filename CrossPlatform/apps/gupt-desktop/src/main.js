@@ -6,6 +6,7 @@ import {
   encodeMessage,
   encodeConnectRequest,
   encodeConnectResponse,
+  encodeFrameAck,
   decodeClipboardText,
   encodeClipboardText,
   encodeKeyboard,
@@ -460,6 +461,11 @@ async function renderFrame(payload) {
     const frame = decodeFrame(payload);
     if (!frame) return;
 
+    // Immediately ACK frame back to host to sustain max 60 FPS without throttle
+    if (frame.frameNumber !== undefined) {
+      sendInput(encodeFrameAck(frame.frameNumber));
+    }
+
     metricsBytes += payload.byteLength;
     metricsFrameCount += 1;
     if (frame.timestampMs > 0) {
@@ -797,11 +803,12 @@ function stopHostStreaming() {
   hostCapture = null;
 }
 
+let hostFrameSeq = 0;
 function encodeBrowserFrame(width, height, jpeg) {
   const frameHeaderSize = 41;
   const payload = new Uint8Array(frameHeaderSize + jpeg.byteLength);
   const view = new DataView(payload.buffer);
-  view.setUint32(0, 0, true);
+  view.setUint32(0, ++hostFrameSeq, true);
   view.setUint32(4, width, true);
   view.setUint32(8, height, true);
   view.setUint32(12, width, true);
