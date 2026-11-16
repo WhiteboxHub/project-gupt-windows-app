@@ -35,7 +35,6 @@
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "shlwapi.lib")
-#pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "windowscodecs.lib")
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "winmm.lib")
@@ -180,7 +179,6 @@ static std::string g_HostIp = "";
 static bool g_LaunchAsHost = false;
 static int g_Launched = 0;
 static std::atomic<bool> g_ForceFullScan{true};
-static bool g_IsConnected = false, g_UsingRelay = false, g_SidebarOpen = false, g_IsFullscreen = false, g_SessionActive = false, g_ClipboardSyncEnabled = true;
 static std::atomic<bool> g_IsConnected{false};
 static std::atomic<bool> g_UsingRelay{false};
 static std::atomic<bool> g_UsingP2P{false};
@@ -618,7 +616,6 @@ static void GetAdaptiveResolutionAndBitrate(uint32_t srcW, uint32_t srcH,
 
 static void HostEncoderLoop(gupt::core::capture::ScreenCapturer* capturer) {
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
-    int frameCounter = 0;
     static uint32_t s_frameCounter = 0;
     static uint64_t s_lastFullScanTick = 0;
 
@@ -634,31 +631,6 @@ static void HostEncoderLoop(gupt::core::capture::ScreenCapturer* capturer) {
             dx = g_DirtyX; dy = g_DirtyY; dw = g_DirtyW; dh = g_DirtyH;
             hasDirty = g_HasDirtyBounds;
         }
-        if(!raw.empty()) {
-            frameCounter++;
-            if(g_ForceFullScan.exchange(false) || !hasDirty || frameCounter > 60) {
-                minX = 0; minY = 0; tw = w; th = h; frameCounter = 0;
-            }
-
-            if(tw > 0 && th > 0) {
-                uint32_t maxX = minX + tw;
-                uint32_t maxY = minY + th;
-                minX = (minX / 16) * 16; minY = (minY / 16) * 16;
-                maxX = ((maxX + 15) / 16) * 16; maxY = ((maxY + 15) / 16) * 16;
-                if(maxX > w) maxX = w; 
-                if(maxY > h) maxY = h;
-                tw = maxX - minX; th = maxY - minY;
-                if(tw >= 16 && th >= 16) {
-                    std::vector<uint8_t> jpg;
-                    uint64_t regionPixels = static_cast<uint64_t>(tw) * static_cast<uint64_t>(th);
-                    uint64_t screenPixels = static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
-                    bool videoLike = regionPixels > (screenPixels / 4);
-                    int quality = videoLike ? 70 : 92;
-                    bool force444 = !videoLike; // 4:4:4 for razor-sharp text, 4:2:0 for video motion to prevent network choking
-                    if(capturer->CaptureRegionJpeg(raw, w, h, minX, minY, tw, th, jpg, quality, force444)){
-                        PushOutbound(gupt::shared::SerializeFrame({0, w, h, tw, th, minX, minY, 32, (tw < w || th < h), (uint64_t)GetTickCount64()}, jpg), false);
-                    }
-                }
         if(!raw.empty() && w > 0 && h > 0) {
             if (g_UsingRelay || g_UsingP2P) {
                 uint32_t sent = g_HostLastSentFrameNum.load();
@@ -1051,38 +1023,6 @@ std::string GetClipboardText() {
     return SafeGetClipboardText();
 }
 
-void SetHostClipboardText(std::string s) {
-    if (s.rfind("GUPT_CLIPBOARD_TEXT_V1\n", 0) == 0) {
-        size_t nl = s.find('\n', 23);
-        if (nl != std::string::npos) s = s.substr(nl + 1);
-    }
-    {
-        std::lock_guard<std::mutex> lk(g_hostClipMtx);
-        g_lastFromClient = s;
-    }
-    int wn = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, 0, 0);
-    if (wn > 0) {
-        HGLOBAL m = GlobalAlloc(GMEM_MOVEABLE, wn * sizeof(wchar_t));
-        if (m) {
-            wchar_t* d = (wchar_t*)GlobalLock(m);
-            MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, d, wn);
-            GlobalUnlock(m);
-            if (OpenClipboard(NULL)) {
-                EmptyClipboard();
-                SetClipboardData(CF_UNICODETEXT, m);
-                CloseClipboard();
-            } else {
-                GlobalFree(m);
-            }
-        }
-    }
-}
-
-static std::vector<uint8_t> MakeConnectRequest(const std::string& session = "") {
-    gupt::shared::ConnectRequest req = {};
-    std::string s = !session.empty() ? session : (!g_CurrentSessionId.empty() ? g_CurrentSessionId : "GUPT_SESSION");
-    strncpy(req.sessionId, s.c_str(), sizeof(req.sessionId) - 1);
-    strncpy(req.authenticationToken, "GUPT_LOCAL_TOKEN", sizeof(req.authenticationToken) - 1);
 static std::vector<uint8_t> MakeConnectRequest() {
     if (g_ClientInstanceToken.empty()) {
         g_ClientInstanceToken = GenerateClientInstanceToken();
@@ -1243,43 +1183,6 @@ static void RunHostMode() {
     std::string rPath = "/relay?role=host&session=" + g_CurrentSessionId;
     g_Relay.Open(g_SignalingHost, g_SignalingPort, rPath, g_SignalingPort == 443);
 
-    WNDCLASSEXA hwc={sizeof(WNDCLASSEXA)}; hwc.lpfnWndProc=[](HWND hw,UINT m,WPARAM w,LPARAM l)->LRESULT{
-        if(m==WM_CLIPBOARDUPDATE){ std::string c=GetClipboardText(); if(!c.empty() && c!=g_lastFromClient){ {std::lock_guard<std::mutex> lk(g_hostClipMtx); if(c==g_lastFromClient)return 0;} auto s=shared::SerializeClipboardText(c); if(g_Relay.connected)g_Relay.Send(s.data(),s.size()); } }
-        return DefWindowProcA(hw,m,w,l);
-    }; hwc.lpszClassName="GuptH"; hwc.hInstance=GetModuleHandle(NULL); RegisterClassExA(&hwc);
-    HWND hHidden=CreateWindowExA(0,"GuptH",0,0,0,0,0,0,HWND_MESSAGE,0,0,0);
-    AddClipboardFormatListener(hHidden);
-
-    std::thread([rPath, &injector]() {
-        while (true) {
-            if(!g_Relay.connected) {
-                g_Relay.Open(g_SignalingHost, g_SignalingPort, rPath, g_SignalingPort==443);
-                if(!g_Relay.connected) { Sleep(1000); continue; }
-            }
-            auto d = g_Relay.Recv(); if(d.empty()){ continue; }
-            auto msgs = shared::DeserializeMessages(d);
-            for(auto& msg : msgs) {
-                auto t = msg.first; auto& p = msg.second;
-                if(t == shared::MessageType::ConnectRequest) {
-                    g_ForceFullScan = true;
-                    if(g_SessionActive) {
-                        shared::ConnectResponse res={true, "OK"}; auto f = shared::SerializeMessage(shared::MessageType::ConnectResponse, res);
-                        g_Relay.Send(f.data(), f.size());
-                    } else if(MessageBoxA(NULL, "Remote client is requesting access via Internet. Allow?", "Gupt Security", MB_YESNO|MB_ICONQUESTION|MB_SETFOREGROUND|MB_TOPMOST)==IDYES) {
-                        shared::ConnectResponse res={true, "OK"}; auto f = shared::SerializeMessage(shared::MessageType::ConnectResponse, res);
-                        g_Relay.Send(f.data(), f.size()); g_SessionActive = true; g_UsingRelay = true; 
-                    } else { 
-                        shared::ConnectResponse res={false, "Denied"}; auto f = shared::SerializeMessage(shared::MessageType::ConnectResponse, res); g_Relay.Send(f.data(), f.size()); 
-                    }
-                }
-                else if(t == shared::MessageType::Disconnect) {
-                    g_SessionActive = false;
-                    g_ForceFullScan = true;
-                }
-                else if(t == shared::MessageType::MouseEvent) { injector.IngestMouseEvent(*reinterpret_cast<const shared::MouseEvent*>(p.data())); }
-                else if(t == shared::MessageType::KeyboardEvent) { injector.IngestKeyboardEvent(*reinterpret_cast<const shared::KeyboardEvent*>(p.data())); }
-                else if(g_ClipboardSyncEnabled && t == shared::MessageType::ClipboardText){ 
-                    SetHostClipboardText(std::string((char*)p.data(), p.size()));
     // Watchdog for idle/stalled relay socket
     std::thread([](){
         while(true) {
@@ -1297,33 +1200,6 @@ static void RunHostMode() {
         }
     }).detach();
 
-    core::network::TcpServer server(8080); 
-    injector.Initialize();
-    core::capture::ScreenCapturer capturer; capturer.Initialize();
-
-    server.SetMessageCallback([&](shared::MessageType t, const std::vector<uint8_t>& p) {
-        if(t==shared::MessageType::ConnectRequest) {
-            g_ForceFullScan = true;
-            if(g_SessionActive) {
-                shared::ConnectResponse res={true,"OK"}; server.SendRaw(shared::SerializeMessage(shared::MessageType::ConnectResponse,res));
-            } else if(MessageBoxA(NULL, "Remote client is requesting access on LAN. Allow?", "Gupt Security", MB_YESNO|MB_ICONQUESTION|MB_SETFOREGROUND|MB_TOPMOST)==IDYES) {
-                g_SessionActive=true; shared::ConnectResponse res={true,"OK"}; server.SendRaw(shared::SerializeMessage(shared::MessageType::ConnectResponse,res));
-            } else {
-                shared::ConnectResponse res={false,"Denied"}; server.SendRaw(shared::SerializeMessage(shared::MessageType::ConnectResponse,res));
-            }
-        }
-        else if(t==shared::MessageType::Disconnect) {
-            g_SessionActive = false;
-            g_ForceFullScan = true;
-        }
-        else if(t==shared::MessageType::MouseEvent) { injector.IngestMouseEvent(*reinterpret_cast<const shared::MouseEvent*>(p.data())); }
-        else if(t==shared::MessageType::KeyboardEvent) { injector.IngestKeyboardEvent(*reinterpret_cast<const shared::KeyboardEvent*>(p.data())); }
-        else if(g_ClipboardSyncEnabled && t==shared::MessageType::ClipboardText){ SetHostClipboardText(std::string((char*)p.data(), p.size())); }
-    });
-    
-    std::thread(HostEncoderLoop, &capturer).detach();
-    std::thread(HostDeliveryLoop, &server).detach();
-    std::thread([](){ while(true){ if(g_SessionActive) PushOutbound({0},true); Sleep(2000); } }).detach();
     // Dedicated Relay Receiver Thread: Secure authenticated session management
     std::thread([rPath, &injector, &capturer]() {
         
@@ -1394,25 +1270,6 @@ static void RunHostMode() {
     });
     server.Start();
 
-    // Show Session ID non-blockingly so video capturing and encoding start immediately
-    std::thread([](){
-        MessageBoxA(NULL, ("Gupt Host is active!\n\nSession ID: " + g_CurrentSessionId).c_str(), "Gupt", MB_OK|MB_ICONINFORMATION|MB_TOPMOST);
-    }).detach();
-
-    while(true) {
-        if(g_SessionActive) {
-            uint64_t loopStart = GetTickCount64();
-            std::vector<uint8_t> raw; uint32_t w, h;
-            bool gotFrame = capturer.CaptureNextFrame(raw, w, h);
-            if(!gotFrame && g_ForceFullScan) {
-                // If desktop is static on initial connect, capture one clean keyframe via GDI
-                gotFrame = capturer.CaptureGdiFallback(raw, w, h);
-            }
-            if(gotFrame) {
-                uint32_t dx=0, dy=0, dw=0, dh=0;
-                bool hasDirty = capturer.GetLastDirtyBounds(dx, dy, dw, dh);
-                { std::lock_guard<std::mutex> lk(g_EncMtx); g_RawQueue = std::move(raw); g_RawW = w; g_RawH = h; g_DirtyX = dx; g_DirtyY = dy; g_DirtyW = dw; g_DirtyH = dh; g_HasDirtyBounds = hasDirty; }
-                g_EncCv.notify_one();
     // Audio Capturer
     static core::audio::AudioCapturer s_audioCapturer;
     s_audioCapturer.Start([](uint32_t sampleRate, uint16_t channels, uint16_t bits, const int16_t* samples, size_t sampleCount) {
@@ -1874,7 +1731,7 @@ LRESULT CALLBACK ClientWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
                         g_UsingRelay = false;
                         g_CryptoSession.InitializeLocalKeyPair();
                         SetWindowTextA(hWnd, "Gupt - Waiting for host approval (LAN)");
-                        auto req = MakeConnectRequest(session);
+                        auto req = MakeConnectRequest();
                         g_Client.SendRaw(req);
                         while(g_Client.IsConnected()){Sleep(250);}
                         g_IsConnected = false;
@@ -1885,24 +1742,6 @@ LRESULT CALLBACK ClientWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
                     }
 
                     if(g_Relay.Open(g_SignalingHost, g_SignalingPort, rp, g_SignalingPort==443)){
-                        g_UsingRelay = true; 
-                        auto req = MakeConnectRequest(session);
-                        g_Relay.Send(req.data(), (uint32_t)req.size());
-                        bool verified = false; 
-                        for(int i=0; i<100 && !verified; ++i){ 
-                            auto d = g_Relay.Recv(); 
-                            if(d.empty()){ Sleep(100); continue; } 
-                            auto msgs = gupt::shared::DeserializeMessages(d); 
-                            for(auto& m : msgs) {
-                                if(m.first == gupt::shared::MessageType::ConnectResponse) {
-                                    if(!m.second.empty() && m.second[0] != 0) verified = true;
-                                } else if(m.first == gupt::shared::MessageType::FrameData) {
-                                    verified = true;
-                                    ProcessFrame(m.second, hWnd);
-                                    PushEv({0xFF});
-                                }
-                            }
-                        }
                         g_UsingRelay = true;
                         g_CryptoSession.InitializeLocalKeyPair();
                         SetWindowTextA(hWnd, "Gupt - Waiting for host approval...");
@@ -2360,35 +2199,6 @@ LRESULT CALLBACK LauncherWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
     default: return DefWindowProcA(hWnd,msg,wp,lp);
     } return 0;
 }
-
-int WINAPI WinMain(HINSTANCE h, HINSTANCE, LPSTR lpCmdLine, int) {
-    SetProcessDPIAware(); CoInitializeEx(0, COINIT_MULTITHREADED);
-
-    // Auto-Elevation to bypass Windows UIPI (enables controlling Task Manager and elevated windows)
-    BOOL isElevated = FALSE;
-    HANDLE hToken = NULL;
-    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
-        TOKEN_ELEVATION elevation;
-        DWORD cbSize = sizeof(TOKEN_ELEVATION);
-        if (GetTokenInformation(hToken, TokenElevation, &elevation, sizeof(elevation), &cbSize)) {
-            isElevated = elevation.TokenIsElevated;
-        }
-        CloseHandle(hToken);
-    }
-
-    if (!isElevated) {
-        char szPath[MAX_PATH];
-        if (GetModuleFileNameA(NULL, szPath, MAX_PATH)) {
-            SHELLEXECUTEINFOA sei = { sizeof(sei) };
-            sei.lpVerb = "runas";
-            sei.lpFile = szPath;
-            sei.lpParameters = lpCmdLine;
-            sei.nShow = SW_SHOWNORMAL;
-            if (ShellExecuteExA(&sei)) {
-                return 0; // Elevated instance launched, terminate un-elevated process
-            }
-        }
-    }
 
 
 int WINAPI WinMain(HINSTANCE h, HINSTANCE, LPSTR, int) {

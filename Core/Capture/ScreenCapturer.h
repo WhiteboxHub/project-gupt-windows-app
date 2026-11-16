@@ -27,7 +27,6 @@ public:
     void GetMonitorBounds(int32_t& left, int32_t& top, int32_t& width, int32_t& height) const;
     void Reset();
     bool CaptureNextFrame(std::vector<uint8_t>& outPixels, uint32_t& outWidth, uint32_t& outHeight);
-    bool CaptureGdiFallback(std::vector<uint8_t>& outPixels, uint32_t& outWidth, uint32_t& outHeight);
     bool CaptureNextFrameGdi(std::vector<uint8_t>& outPixels, uint32_t& outWidth, uint32_t& outHeight);
     bool GetLastDirtyBounds(uint32_t& x, uint32_t& y, uint32_t& w, uint32_t& h) const;
     bool CaptureNextFrameJpeg(std::vector<uint8_t>& outJpeg, uint32_t& outWidth, uint32_t& outHeight, int quality);
