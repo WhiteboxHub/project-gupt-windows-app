@@ -2,9 +2,11 @@
 
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <wincodec.h>
 #include <wrl/client.h>
 #include <vector>
 #include <cstdint>
+#include <atomic>
 #include "../../Shared/Protocol.h"
 
 namespace gupt {
@@ -18,23 +20,53 @@ public:
     ScreenCapturer();
     ~ScreenCapturer();
 
-    bool Initialize();
+    bool Initialize(uint32_t monitorIndex = 0);
+    uint32_t GetMonitorCount();
+    bool SetMonitorIndex(uint32_t index);
+    uint32_t GetCurrentMonitorIndex() const { return m_SelectedOutputIndex; }
+    void GetMonitorBounds(int32_t& left, int32_t& top, int32_t& width, int32_t& height) const;
     void Reset();
     bool CaptureNextFrame(std::vector<uint8_t>& outPixels, uint32_t& outWidth, uint32_t& outHeight);
     bool CaptureGdiFallback(std::vector<uint8_t>& outPixels, uint32_t& outWidth, uint32_t& outHeight);
+    bool CaptureNextFrameGdi(std::vector<uint8_t>& outPixels, uint32_t& outWidth, uint32_t& outHeight);
     bool GetLastDirtyBounds(uint32_t& x, uint32_t& y, uint32_t& w, uint32_t& h) const;
     bool CaptureNextFrameJpeg(std::vector<uint8_t>& outJpeg, uint32_t& outWidth, uint32_t& outHeight, int quality);
-    bool CaptureRegionJpeg(const std::vector<uint8_t>& rawPixels, uint32_t fullWidth, uint32_t fullHeight, uint32_t x, uint32_t y, uint32_t w, uint32_t h, std::vector<uint8_t>& outJpeg, int quality, bool force444 = true);
+    bool CaptureRegionJpeg(const std::vector<uint8_t>& rawPixels, uint32_t fullWidth, uint32_t fullHeight, uint32_t x, uint32_t y, uint32_t w, uint32_t h, std::vector<uint8_t>& outJpeg, int quality, bool force444 = false);
     void ReleaseFrame();
+    void RequestKeyframe() { m_ForceKeyframe.store(true); }
+    void SetDrawCursor(bool enable) { m_DrawCursor = enable; }
+    bool GetDrawCursor() const { return m_DrawCursor; }
 
 private:
+    void CleanupGdi();
+
+    bool m_DrawCursor = false; // False by default: client renders zero-latency local cursor (Chrome Remote Desktop standard)
+
     ComPtr<ID3D11Device> m_Device;
     ComPtr<ID3D11DeviceContext> m_DeviceContext;
     ComPtr<IDXGIOutputDuplication> m_DeskDupl;
+    ComPtr<ID3D11Texture2D> m_StagingTexture;
+    uint32_t m_StagingWidth = 0;
+    uint32_t m_StagingHeight = 0;
     uint32_t m_Width = 0;
     uint32_t m_Height = 0;
+    uint32_t m_SelectedOutputIndex = 0;
+    RECT m_MonitorBounds = { 0, 0, 0, 0 };
     RECT m_LastDirtyBounds = { 0, 0, 0, 0 };
     bool m_HasLastDirtyBounds = false;
+    std::vector<uint8_t> m_CachedFrame;
+    POINT m_LastCursorPos = { -1, -1 };
+    uint64_t m_LastForceCaptureTick = 0;
+    std::atomic<bool> m_ForceKeyframe{true};
+
+    // Fast persistent GDI fallback
+    HDC m_hGdiScreenDC = NULL;
+    HDC m_hGdiMemDC = NULL;
+    HBITMAP m_hGdiBitmap = NULL;
+    HBITMAP m_hGdiOldBitmap = NULL;
+    void* m_pGdiBits = NULL;
+    int m_GdiWidth = 0;
+    int m_GdiHeight = 0;
 };
 
 } // namespace capture

@@ -448,6 +448,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         }
         case WM_KEYDOWN:
         case WM_KEYUP: {
+            if ((wParam == VK_F5 || (wParam == 'R' && (GetKeyState(VK_CONTROL) & 0x8000))) && message == WM_KEYDOWN) {
+                if (g_IsConnected) {
+                    g_Client.SendRaw(shared::SerializeMessage(shared::MessageType::RefreshRequest, (uint8_t)1));
+                    std::lock_guard<std::mutex> lock(g_FrameMutex);
+                    g_LatestFrame.clear();
+                    g_FrameWidth = 0; g_FrameHeight = 0;
+                    InvalidateRect(hWnd, NULL, TRUE);
+                }
+                return 0;
+            }
             if (wParam == VK_F11 && message == WM_KEYDOWN) {
                 g_IsFullscreen = !g_IsFullscreen;
                 if (g_IsFullscreen) {

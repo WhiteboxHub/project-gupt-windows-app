@@ -1,6 +1,7 @@
 #include <iostream>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <shellapi.h>
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -77,6 +78,8 @@ int main() {
             } else if (type == shared::MessageType::KeyboardEvent) {
                 auto ev = reinterpret_cast<const shared::KeyboardEvent*>(payload.data());
                 injector.IngestKeyboardEvent(*ev);
+            } else if (type == shared::MessageType::RefreshRequest) {
+                capturer.Reset();
             } else if (type == shared::MessageType::ClipboardText) {
                 if (!payload.empty()) {
                     std::string utf8(reinterpret_cast<const char*>(payload.data()), payload.size());

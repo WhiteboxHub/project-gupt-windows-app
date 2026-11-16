@@ -18,7 +18,7 @@ gcloud builds submit --tag gcr.io/%PROJ%/gupt-signal-server
 if errorlevel 1 goto BUILD_FAILED
 
 echo INFO: Deploying to Google Cloud Run...
-gcloud run deploy gupt-signal-server --image gcr.io/%PROJ%/gupt-signal-server --platform managed --region us-central1 --allow-unauthenticated --port 8080
+gcloud run deploy gupt-signal-server --image gcr.io/%PROJ%/gupt-signal-server --platform managed --region us-central1 --allow-unauthenticated --port 8080 --timeout=3600 --session-affinity --min-instances=1 --cpu-throttling=false
 if errorlevel 1 goto DEPLOY_FAILED
 
 echo.
