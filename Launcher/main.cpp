@@ -645,30 +645,57 @@ static void HostEncoderLoop(gupt::core::capture::ScreenCapturer* capturer) {
                 }
             }
             uint64_t now = GetTickCount64();
-            bool isFullScan = g_ForceFullScan || (now - s_lastFullScanTick > 10000) || !hasDirty || (dw == 0 || dh == 0);
+            bool isFullScan = g_ForceFullScan || (now - s_lastFullScanTick > 1000) || !hasDirty || (dw == 0 || dh == 0);
 
             uint32_t targetX = 0, targetY = 0, targetW = w, targetH = h;
 
             if (!isFullScan) {
+                // Union with previous dirty region so the previous cursor/edit position is ALWAYS
+                // refreshed with ground-truth background pixels, guaranteeing zero residual trails
+                static uint32_t s_prevDx = 0, s_prevDy = 0, s_prevDw = 0, s_prevDh = 0;
+                static bool s_hasPrevDirty = false;
+
+                uint32_t combinedX = dx;
+                uint32_t combinedY = dy;
+                uint32_t combinedR = dx + dw;
+                uint32_t combinedB = dy + dh;
+
+                if (s_hasPrevDirty && s_prevDw > 0 && s_prevDh > 0) {
+                    uint32_t prevR = s_prevDx + s_prevDw;
+                    uint32_t prevB = s_prevDy + s_prevDh;
+                    int distX = static_cast<int>(dx) - static_cast<int>(s_prevDx);
+                    int distY = static_cast<int>(dy) - static_cast<int>(s_prevDy);
+                    int distSq = distX * distX + distY * distY;
+                    if (distSq < 400 * 400) {
+                        if (s_prevDx < combinedX) combinedX = s_prevDx;
+                        if (s_prevDy < combinedY) combinedY = s_prevDy;
+                        if (prevR > combinedR) combinedR = prevR;
+                        if (prevB > combinedB) combinedB = prevB;
+                    }
+                }
+
+                s_prevDx = dx; s_prevDy = dy; s_prevDw = dw; s_prevDh = dh;
+                s_hasPrevDirty = true;
+
                 // 8-pixel macroblock alignment for optimal JPEG 8x8 DCT blocks
-                targetX = (dx / 8) * 8;
-                targetY = (dy / 8) * 8;
-                uint32_t right = ((dx + dw + 7) / 8) * 8;
-                uint32_t bottom = ((dy + dh + 7) / 8) * 8;
+                targetX = (combinedX / 8) * 8;
+                targetY = (combinedY / 8) * 8;
+                uint32_t right = ((combinedR + 7) / 8) * 8;
+                uint32_t bottom = ((combinedB + 7) / 8) * 8;
                 if (right > w) right = w;
                 if (bottom > h) bottom = h;
-                targetW = right - targetX;
-                targetH = bottom - targetY;
+                targetW = (right > targetX) ? (right - targetX) : w;
+                targetH = (bottom > targetY) ? (bottom - targetY) : h;
 
-                // When switching tabs, opening windows, or maximizing:
-                // If more than 80% of the screen changed, promote to full-screen keyframe so client
-                // instantaneously renders the new tab with zero lag, dropping stale intermediate frames.
+                // When switching tabs, opening windows, or moving cursor across large regions:
+                // If more than 30% of the screen changed, promote to full-screen keyframe
                 float dirtyRatio = static_cast<float>((size_t)targetW * targetH) / static_cast<float>((size_t)w * h);
-                if (dirtyRatio >= 0.80f) {
+                if (dirtyRatio >= 0.30f) {
                     targetX = 0; targetY = 0; targetW = w; targetH = h;
                     isFullScan = true;
                     s_lastFullScanTick = now;
                     g_ForceFullScan = false;
+                    s_hasPrevDirty = false;
                 }
             } else {
                 s_lastFullScanTick = now;
