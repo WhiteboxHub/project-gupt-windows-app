@@ -376,23 +376,6 @@ bool ScreenCapturer::CaptureNextFrame(std::vector<uint8_t>& outPixels, uint32_t&
         }
     }
 
-    // Always union the previous cursor region and current cursor region into the dirty bounds.
-    // This guarantees that when the mouse moves over any window, the previous cursor position is
-    // ALWAYS included in the transmitted rectangle and overwritten with fresh clean background pixels,
-    // completely eliminating ghost cursor trails!
-    POINT curPt = {0, 0};
-    if (GetCursorPos(&curPt)) {
-        if (m_LastCursorPos.x != -1) {
-            if (curPt.x != m_LastCursorPos.x || curPt.y != m_LastCursorPos.y) {
-                RECT oldCursorRect = { m_LastCursorPos.x - 32, m_LastCursorPos.y - 32, m_LastCursorPos.x + 48, m_LastCursorPos.y + 48 };
-                RECT newCursorRect = { curPt.x - 32, curPt.y - 32, curPt.x + 48, curPt.y + 48 };
-                UnionDirtyRect(m_LastDirtyBounds, m_HasLastDirtyBounds, oldCursorRect, outWidth, outHeight);
-                UnionDirtyRect(m_LastDirtyBounds, m_HasLastDirtyBounds, newCursorRect, outWidth, outHeight);
-            }
-        }
-        m_LastCursorPos = curPt;
-    }
-
     if (!m_HasLastDirtyBounds) {
         m_LastDirtyBounds = { 0, 0, static_cast<LONG>(outWidth), static_cast<LONG>(outHeight) };
         m_HasLastDirtyBounds = true;

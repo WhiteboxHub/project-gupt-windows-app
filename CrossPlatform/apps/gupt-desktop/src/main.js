@@ -27,6 +27,9 @@ const statusMsg = document.getElementById("status");
 const streamStatus = document.getElementById("streamStatus");
 const canvas = document.getElementById("screen");
 const ctx = canvas.getContext("2d", { alpha: false });
+const offscreenCanvas = document.createElement("canvas");
+const offscreenCtx = offscreenCanvas.getContext("2d", { alpha: false });
+let hasMasterFrame = false;
 
 const fullScreenBtn = document.getElementById("fullScreenBtn");
 const exitFullScreenBtn = document.getElementById("exitFullScreenBtn");
@@ -141,6 +144,12 @@ clipboardSyncToggle?.addEventListener("change", () => {
 });
 
 window.addEventListener("resize", resizeCanvas);
+if (window.ResizeObserver) {
+  const ro = new ResizeObserver(() => {
+    resizeCanvas();
+  });
+  ro.observe(document.documentElement);
+}
 window.addEventListener("error", (event) => {
   reportError("window-error", event.error || event.message);
 });
@@ -166,6 +175,9 @@ function clearCanvas(message = "") {
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   remoteWidth = 0;
   remoteHeight = 0;
+  hasMasterFrame = false;
+  offscreenCanvas.width = 0;
+  offscreenCanvas.height = 0;
   drawScale = 1;
   drawScaleX = 1;
   drawScaleY = 1;
@@ -345,14 +357,21 @@ function handleClientMessage(event) {
       lastFrameReceivedAt = Date.now();
       if (freezeBanner && !freezeBanner.hidden) freezeBanner.hidden = true;
 
+      // Extract frame number immediately and ACK back to host with zero queue delay
+      if (msg.payload.byteLength >= 4) {
+        const frameNumber = new DataView(msg.payload.buffer, msg.payload.byteOffset, 4).getUint32(0, true);
+        sendInput(encodeFrameAck(frameNumber));
+      }
+
       const isDelta = msg.payload.byteLength >= 41
         ? (new DataView(msg.payload.buffer, msg.payload.byteOffset, msg.payload.byteLength).getUint8(32) !== 0)
         : false;
 
       if (!isDelta) {
+        // Full keyframe supersedes any older delta frames
         pendingFrames = [msg.payload];
       } else {
-        if (pendingFrames.length > 8) {
+        if (pendingFrames.length > 20) {
           pendingFrames.shift();
         }
         pendingFrames.push(msg.payload);
@@ -456,15 +475,29 @@ function updateMetricsDisplay() {
   streamStatus.textContent = `Connected (${metricsFps} FPS • ${latencyStr} • ${metricsBitrate} Mbps)`;
 }
 
+function paintMasterBuffer() {
+  if (!canvas.width || !canvas.height) return;
+  // Always clear entire display canvas to solid black letterbox background
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (!remoteWidth || !remoteHeight || !hasMasterFrame || !offscreenCanvas.width || !offscreenCanvas.height) return;
+
+  const destW = Math.round(remoteWidth * drawScaleX);
+  const destH = Math.round(remoteHeight * drawScaleY);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(
+    offscreenCanvas,
+    0, 0, remoteWidth, remoteHeight,
+    drawX, drawY, destW, destH
+  );
+}
+
 async function renderFrame(payload) {
   try {
     const frame = decodeFrame(payload);
     if (!frame) return;
-
-    // Immediately ACK frame back to host to sustain max 60 FPS without throttle
-    if (frame.frameNumber !== undefined) {
-      sendInput(encodeFrameAck(frame.frameNumber));
-    }
 
     metricsBytes += payload.byteLength;
     metricsFrameCount += 1;
@@ -475,21 +508,44 @@ async function renderFrame(payload) {
       }
     }
 
+    let dimsChanged = false;
     if (frame.totalWidth !== remoteWidth || frame.totalHeight !== remoteHeight) {
       remoteWidth = frame.totalWidth;
       remoteHeight = frame.totalHeight;
-      resizeCanvas();
+      offscreenCanvas.width = remoteWidth;
+      offscreenCanvas.height = remoteHeight;
+      offscreenCtx.fillStyle = "#000";
+      offscreenCtx.fillRect(0, 0, remoteWidth, remoteHeight);
+      dimsChanged = true;
     }
 
     const blob = new Blob([frame.jpeg], { type: "image/jpeg" });
     const bitmap = await createImageBitmap(blob);
-    ctx.drawImage(
+
+    // 1. Paint decoded frame directly into unscaled master offscreen buffer at 1:1 pixel coordinates
+    offscreenCtx.drawImage(
       bitmap,
-      frame.targetX * drawScaleX + drawX,
-      frame.targetY * drawScaleY + drawY,
-      frame.updateWidth * drawScaleX,
-      frame.updateHeight * drawScaleY
+      frame.targetX,
+      frame.targetY,
+      frame.updateWidth,
+      frame.updateHeight
     );
+    hasMasterFrame = true;
+
+    // 2. If screen resolution changed or full keyframe arrived, re-letterbox entire screen
+    const isFullKeyframe = !frame.isDelta || (frame.updateWidth >= frame.totalWidth && frame.updateHeight >= frame.totalHeight);
+    if (dimsChanged || isFullKeyframe) {
+      resizeCanvas();
+    } else {
+      // Differential update: blit dirty rect directly onto display canvas
+      ctx.drawImage(
+        bitmap,
+        Math.round(drawX + frame.targetX * drawScaleX),
+        Math.round(drawY + frame.targetY * drawScaleY),
+        Math.round(frame.updateWidth * drawScaleX),
+        Math.round(frame.updateHeight * drawScaleY)
+      );
+    }
     bitmap.close();
   } catch (err) {
     console.error("RENDER ERROR:", err);
@@ -499,48 +555,41 @@ async function renderFrame(payload) {
 
 function resizeCanvas() {
   const dpr = window.devicePixelRatio || 1;
-  const newW = Math.floor(window.innerWidth * dpr);
-  const newH = Math.floor(window.innerHeight * dpr);
+  const newW = Math.max(1, Math.floor(window.innerWidth * dpr));
+  const newH = Math.max(1, Math.floor(window.innerHeight * dpr));
 
   if (canvas.width !== newW || canvas.height !== newH) {
-    if (canvas.width > 0 && canvas.height > 0) {
-      const tempCanvas = document.createElement("canvas");
-      tempCanvas.width = canvas.width;
-      tempCanvas.height = canvas.height;
-      const tempCtx = tempCanvas.getContext("2d");
-      tempCtx.drawImage(canvas, 0, 0);
-
-      canvas.width = newW;
-      canvas.height = newH;
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = "high";
-      ctx.drawImage(tempCanvas, 0, 0, newW, newH);
-    } else {
-      canvas.width = newW;
-      canvas.height = newH;
-      ctx.fillStyle = "#000";
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = "high";
-    }
+    canvas.width = newW;
+    canvas.height = newH;
   }
 
   if (!remoteWidth || !remoteHeight) return;
+
   const scaleX = canvas.width / remoteWidth;
   const scaleY = canvas.height / remoteHeight;
+
   if (viewMode === "stretch") {
     drawScale = 1;
     drawScaleX = scaleX;
     drawScaleY = scaleY;
     drawX = 0;
     drawY = 0;
-    return;
+  } else if (viewMode === "cover") {
+    drawScale = Math.max(scaleX, scaleY);
+    drawScaleX = drawScale;
+    drawScaleY = drawScale;
+    drawX = Math.floor((canvas.width - remoteWidth * drawScale) / 2);
+    drawY = Math.floor((canvas.height - remoteHeight * drawScale) / 2);
+  } else {
+    // "contain" (Fit Screen) - Clean letterbox without clipping
+    drawScale = Math.min(scaleX, scaleY);
+    drawScaleX = drawScale;
+    drawScaleY = drawScale;
+    drawX = Math.max(0, Math.floor((canvas.width - remoteWidth * drawScale) / 2));
+    drawY = Math.max(0, Math.floor((canvas.height - remoteHeight * drawScale) / 2));
   }
-  drawScale = viewMode === "cover" ? Math.max(scaleX, scaleY) : Math.min(scaleX, scaleY);
-  drawScaleX = drawScale;
-  drawScaleY = drawScale;
-  drawX = Math.floor((canvas.width - remoteWidth * drawScale) / 2);
-  drawY = Math.floor((canvas.height - remoteHeight * drawScale) / 2);
+
+  paintMasterBuffer();
 }
 
 function sendInput(bytes) {
@@ -632,8 +681,12 @@ function normalizedPosition(event) {
   // Convert viewport client coords into internal canvas buffer coords
   const canvasX = (event.clientX - rect.left) * (canvas.width / rect.width);
   const canvasY = (event.clientY - rect.top) * (canvas.height / rect.height);
-  const x = (canvasX - drawX) / (remoteWidth * drawScaleX);
-  const y = (canvasY - drawY) / (remoteHeight * drawScaleY);
+  const activeW = remoteWidth * drawScaleX;
+  const activeH = remoteHeight * drawScaleY;
+  if (activeW <= 0 || activeH <= 0) return null;
+
+  const x = (canvasX - drawX) / activeW;
+  const y = (canvasY - drawY) / activeH;
   if (x < 0 || x > 1 || y < 0 || y > 1) return null;
   return { x, y };
 }
