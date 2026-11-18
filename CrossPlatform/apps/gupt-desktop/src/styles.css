@@ -269,13 +269,14 @@ body {
   height: 100vh;
   position: relative;
   background: #000;
+  overflow: hidden;
 }
 
 #screen {
   width: 100%;
   height: 100%;
   display: block;
-  cursor: default;
+  cursor: none !important; /* Hide native client cursor to seamlessly operate the remote Windows cursor */
 }
 
 /* Remote Host Shared Cursor Overlay */
@@ -285,8 +286,8 @@ body {
   left: 0;
   pointer-events: none;
   z-index: 60;
-  transition: transform 0.04s ease-out;
-  filter: drop-shadow(0 2px 5px rgba(0,0,0,0.6));
+  will-change: transform;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
 }
 
 /* Connection Acknowledgement Toast Banner */

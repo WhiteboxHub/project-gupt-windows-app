@@ -1128,94 +1128,6 @@ static void SendRelayP2PCandidateAsync() {
     }).detach();
 }
 
-static HWND g_hHostSessionBar = NULL;
-
-static LRESULT CALLBACK HostSessionBarWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
-    switch (msg) {
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hWnd, &ps);
-        RECT r; GetClientRect(hWnd, &r);
-        HBRUSH brBg = CreateSolidBrush(RGB(18, 20, 29));
-        FillRect(hdc, &r, brBg);
-        DeleteObject(brBg);
-
-        // Green active status dot
-        HBRUSH brDot = CreateSolidBrush(RGB(16, 185, 129));
-        HGDIOBJ oldBrush = SelectObject(hdc, brDot);
-        HGDIOBJ oldPen = SelectObject(hdc, GetStockObject(NULL_PEN));
-        Ellipse(hdc, 14, (r.bottom - 10) / 2, 24, (r.bottom + 10) / 2);
-        SelectObject(hdc, oldBrush);
-        SelectObject(hdc, oldPen);
-        DeleteObject(brDot);
-
-        // Status text
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, RGB(255, 255, 255));
-        HFONT hFont = CreateFontA(14, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI");
-        HFONT hOld = (HFONT)SelectObject(hdc, hFont);
-        RECT textRect = { 32, 0, r.right - 105, r.bottom };
-        DrawTextA(hdc, "Gupt: Remote User Connected & Active", -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-        SelectObject(hdc, hOld);
-        DeleteObject(hFont);
-
-        EndPaint(hWnd, &ps);
-        return 0;
-    }
-    case WM_COMMAND: {
-        if (LOWORD(wp) == 201) { // Disconnect button
-            g_SessionActive = false;
-            auto dcPkt = shared::SerializeMessage(shared::MessageType::Disconnect, static_cast<uint8_t>(1));
-            PushOutbound(dcPkt, true);
-            ShowWindow(hWnd, SW_HIDE);
-        }
-        return 0;
-    }
-    default:
-        return DefWindowProcA(hWnd, msg, wp, lp);
-    }
-}
-
-static void ShowHostSessionBar() {
-    if (!g_hHostSessionBar) {
-        HINSTANCE hInst = GetModuleHandle(NULL);
-        WNDCLASSEXA wc = { sizeof(WNDCLASSEXA) };
-        wc.lpfnWndProc = HostSessionBarWndProc;
-        wc.hInstance = hInst;
-        wc.lpszClassName = "GuptHostBar";
-        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-        RegisterClassExA(&wc);
-
-        int barW = 420;
-        int barH = 42;
-        int barX = (GetSystemMetrics(SM_CXSCREEN) - barW) / 2;
-        int barY = 12;
-
-        g_hHostSessionBar = CreateWindowExA(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-            "GuptHostBar", "Gupt Session Active",
-            WS_POPUP | WS_VISIBLE,
-            barX, barY, barW, barH,
-            NULL, NULL, hInst, NULL
-        );
-
-        CreateWindowExA(
-            0, "BUTTON", "Disconnect",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            barW - 100, 7, 90, 28,
-            g_hHostSessionBar, (HMENU)201, hInst, NULL
-        );
-    } else {
-        ShowWindow(g_hHostSessionBar, SW_SHOW);
-    }
-}
-
-static void HideHostSessionBar() {
-    if (g_hHostSessionBar) {
-        ShowWindow(g_hHostSessionBar, SW_HIDE);
-    }
-}
-
 static void HandleHostConnectRequest(
     const std::vector<uint8_t>& p,
     bool isRelay,
@@ -1231,7 +1143,6 @@ static void HandleHostConnectRequest(
     g_ForceFullScan = true;
     capturer.RequestKeyframe();
     if (isRelay) SendRelayP2PCandidateAsync();
-    ShowHostSessionBar();
     GuptLog("Host accepted client connection for session %s (immediate access)", g_CurrentSessionId.c_str());
 }
 
