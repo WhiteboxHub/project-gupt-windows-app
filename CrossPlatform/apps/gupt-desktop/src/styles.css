@@ -282,6 +282,8 @@ body {
   max-height: 100vh;
   object-fit: contain;
   display: block;
+  image-rendering: -webkit-optimize-contrast;
+  image-rendering: crisp-edges;
   cursor: default;
 }
 

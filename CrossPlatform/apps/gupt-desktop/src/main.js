@@ -485,11 +485,12 @@ async function renderFrame(payload) {
       remoteHeight = frame.totalHeight;
       canvas.width = remoteWidth;
       canvas.height = remoteHeight;
+      ctx.imageSmoothingEnabled = false;
       resizeCanvas();
     }
 
     const blob = new Blob([frame.jpeg], { type: "image/jpeg" });
-    const bitmap = await createImageBitmap(blob);
+    const bitmap = await createImageBitmap(blob, { premultiplyAlpha: "none" });
 
     // Blit frame directly onto native resolution canvas with zero intermediate copies or subpixel rounding
     ctx.drawImage(
