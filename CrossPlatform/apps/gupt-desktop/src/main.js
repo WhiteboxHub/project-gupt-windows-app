@@ -13,7 +13,6 @@ import {
   encodeMouseButton,
   encodeMouseMove,
   encodeMouseWheel,
-  decodeCursorPosition,
 } from "./protocol.js";
 
 const SIGNALING_HOST = "gupt-signal-server-560359652969.us-central1.run.app";
@@ -41,76 +40,6 @@ const freezeBanner = document.getElementById("freezeBanner");
 const freezeBannerText = document.getElementById("freezeBannerText");
 const bannerReconnectBtn = document.getElementById("bannerReconnectBtn");
 const refreshStreamBtn = document.getElementById("refreshStreamBtn");
-const remoteCursor = document.getElementById("remoteCursor");
-const connectToast = document.getElementById("connectToast");
-const toastText = document.getElementById("toastText");
-
-const CURSOR_SVGS = [
-  // 0: Default Windows Arrow Pointer
-  `<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M4 2L11 20L14 13L21 10L4 2Z" fill="#FFFFFF" stroke="#000000" stroke-width="1.6" stroke-linejoin="round"/></svg>`,
-  // 1: Text Selection (I-Beam)
-  `<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M8 4H16M12 4V20M8 20H16" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round"/><path d="M8 4H16M12 4V20M8 20H16" stroke="#000000" stroke-width="1.5" stroke-linecap="round"/></svg>`,
-  // 2: Link Hover Hand Pointer
-  `<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M9 11V5.5C9 4.67 9.67 4 10.5 4C11.33 4 12 4.67 12 5.5V11M12 11V4.5C12 3.67 12.67 3 13.5 3C14.33 3 15 3.67 15 4.5V11M15 11V5.5C15 4.67 15.67 4 16.5 4C17.33 4 18 4.67 18 5.5V13C18 17.42 14.42 21 10 21C6.69 21 4 18.31 4 15V13C4 11.9 4.9 11 6 11C6.55 11 7.05 11.22 7.41 11.59L9 13.17V11Z" fill="#FFFFFF" stroke="#000000" stroke-width="1.6" stroke-linejoin="round"/></svg>`,
-  // 3: Horizontal Window Resize (ew-resize)
-  `<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M3 12L7 8V11H17V8L21 12L17 16V13H7V16L3 12Z" fill="#FFFFFF" stroke="#000000" stroke-width="1.6" stroke-linejoin="round"/></svg>`,
-  // 4: Vertical Window Resize (ns-resize)
-  `<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M12 3L8 7H11V17H8L12 21L16 17H13V7H16L12 3Z" fill="#FFFFFF" stroke="#000000" stroke-width="1.6" stroke-linejoin="round"/></svg>`,
-  // 5: Diagonal Resize 1 (nwse-resize)
-  `<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M5 5H11M5 5V11M5 5L19 19M19 19V13M19 19H13" stroke="#FFFFFF" stroke-width="3.5" stroke-linecap="round"/><path d="M5 5H11M5 5V11M5 5L19 19M19 19V13M19 19H13" stroke="#000000" stroke-width="1.6" stroke-linecap="round"/></svg>`,
-  // 6: Diagonal Resize 2 (nesw-resize)
-  `<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M19 5H13M19 5V11M19 5L5 19M5 19V13M5 19H11" stroke="#FFFFFF" stroke-width="3.5" stroke-linecap="round"/><path d="M19 5H13M19 5V11M19 5L5 19M5 19V13M5 19H11" stroke="#000000" stroke-width="1.6" stroke-linecap="round"/></svg>`,
-  // 7: 4-Way Window Move (move)
-  `<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><path d="M12 2L9 5H11V9H7V7L4 10L7 13V11H11V15H9L12 18L15 15H13V11H17V13L20 10L17 7V9H13V5H15L12 2Z" fill="#FFFFFF" stroke="#000000" stroke-width="1.6" stroke-linejoin="round"/></svg>`,
-  // 8: Disabled / Not Allowed
-  `<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="#EF4444" stroke-width="2.5"/><line x1="5.5" y1="5.5" x2="18.5" y2="18.5" stroke="#EF4444" stroke-width="2.5"/></svg>`,
-  // 9: Wait
-  `<svg width="22" height="22" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8" stroke="#3B82F6" stroke-width="2.5" stroke-dasharray="12 12"/></svg>`
-];
-
-const CURSOR_HOTSPOTS = [
-  { x: 4, y: 2 },    // 0: default arrow tip
-  { x: 12, y: 12 },  // 1: I-beam center
-  { x: 9, y: 4 },    // 2: Hand pointer index finger tip
-  { x: 12, y: 12 },  // 3: ew-resize center
-  { x: 12, y: 12 },  // 4: ns-resize center
-  { x: 12, y: 12 },  // 5: nwse center
-  { x: 12, y: 12 },  // 6: nesw center
-  { x: 12, y: 12 },  // 7: move center
-  { x: 12, y: 12 },  // 8: not-allowed center
-  { x: 12, y: 12 },  // 9: wait center
-];
-
-let activeCursorShapeId = -1;
-function updateRemoteCursorShape(shapeId) {
-  const sid = (shapeId >= 0 && shapeId < CURSOR_SVGS.length) ? shapeId : 0;
-  if (sid !== activeCursorShapeId) {
-    activeCursorShapeId = sid;
-    if (remoteCursor) {
-      remoteCursor.innerHTML = CURSOR_SVGS[sid];
-    }
-  }
-}
-
-function positionRemoteCursor(clientX, clientY) {
-  if (!remoteCursor) return;
-  const hs = CURSOR_HOTSPOTS[activeCursorShapeId >= 0 ? activeCursorShapeId : 0];
-  remoteCursor.style.transform = `translate(${clientX - hs.x}px, ${clientY - hs.y}px)`;
-}
-
-// Initialize default cursor shape
-updateRemoteCursorShape(0);
-
-let toastTimer = null;
-function showConnectToast(msg) {
-  if (!connectToast || !toastText) return;
-  toastText.textContent = msg;
-  connectToast.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => {
-    connectToast.hidden = true;
-  }, 4500);
-}
 
 let activeSessionId = "";
 let lastFrameReceivedAt = 0;
@@ -422,28 +351,6 @@ function handleClientMessage(event) {
       } else {
         lastFrameReceivedAt = Date.now();
         if (freezeBanner) freezeBanner.hidden = true;
-        showConnectToast(`Connected to Host (${activeSessionId || sessionInput.value.trim()}) — Remote Control Active`);
-      }
-    } else if (msg.type === MessageType.CursorPosition) {
-      const cursor = decodeCursorPosition(msg.payload);
-      if (cursor) {
-        updateRemoteCursorShape(cursor.shapeId);
-
-        const now = performance.now();
-        // If the local user isn't actively moving the mouse, follow the remote host user's mouse
-        if (now - lastLocalMouseMoveTime > 80) {
-          if (!cursor.isVisible) {
-            remoteCursor.hidden = true;
-          } else if (remoteWidth > 0 && remoteHeight > 0 && canvas.width > 0 && canvas.height > 0) {
-            const rect = canvas.getBoundingClientRect();
-            const pixelX = drawX + cursor.x * (remoteWidth * drawScaleX);
-            const pixelY = drawY + cursor.y * (remoteHeight * drawScaleY);
-            const domX = (pixelX / canvas.width) * rect.width + rect.left;
-            const domY = (pixelY / canvas.height) * rect.height + rect.top;
-            positionRemoteCursor(domX, domY);
-            remoteCursor.hidden = false;
-          }
-        }
       }
     } else if (msg.type === MessageType.FrameData) {
       isSessionConnected = true;
@@ -690,28 +597,8 @@ function sendInput(bytes) {
 }
 
 let lastMouseTime = 0;
-let lastLocalMouseMoveTime = 0;
-
-canvas.addEventListener("mouseenter", () => {
-  if (isSessionConnected && remoteCursor) {
-    remoteCursor.hidden = false;
-  }
-});
-
-canvas.addEventListener("mouseleave", () => {
-  if (remoteCursor) {
-    remoteCursor.hidden = true;
-  }
-});
-
 canvas.addEventListener("mousemove", (event) => {
   const now = performance.now();
-  lastLocalMouseMoveTime = now;
-
-  // Instantaneous 0ms local cursor positioning (Chrome Remote Desktop standard)
-  positionRemoteCursor(event.clientX, event.clientY);
-  if (remoteCursor && remoteCursor.hidden) remoteCursor.hidden = false;
-
   if (now - lastMouseTime < 4) return;
   lastMouseTime = now;
   const pos = normalizedPosition(event);
@@ -848,9 +735,6 @@ function disconnect() {
   // 6. Close sidebar & hide freeze alerts
   if (sidebar) sidebar.classList.remove("open");
   if (freezeBanner) freezeBanner.hidden = true;
-  if (remoteCursor) remoteCursor.hidden = true;
-  if (connectToast) connectToast.hidden = true;
-  canvas.style.cursor = "default";
   streamStatus.textContent = "Disconnected";
   statusEl.textContent = "Ready to connect. Enter a new session ID.";
 

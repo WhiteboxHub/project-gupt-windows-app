@@ -1284,64 +1284,6 @@ static void RunHostMode() {
     // Start background Encoder and Delivery loops
     std::thread(HostEncoderLoop, &capturer).detach();
     std::thread(HostDeliveryLoop, &server).detach();
-
-    // Dedicated Real-Time Cursor Tracking & Shape Synchronization Thread (60 Hz)
-    std::thread([&capturer]() {
-        static POINT s_lastPt = { -1, -1 };
-        static uint8_t s_lastShape = 0;
-        static bool s_lastVisible = true;
-
-        HCURSOR hIBeam = LoadCursor(NULL, IDC_IBEAM);
-        HCURSOR hHand  = LoadCursor(NULL, IDC_HAND);
-        HCURSOR hSizeWE = LoadCursor(NULL, IDC_SIZEWE);
-        HCURSOR hSizeNS = LoadCursor(NULL, IDC_SIZENS);
-        HCURSOR hSizeNWSE = LoadCursor(NULL, IDC_SIZENWSE);
-        HCURSOR hSizeNESW = LoadCursor(NULL, IDC_SIZENESW);
-        HCURSOR hSizeAll = LoadCursor(NULL, IDC_SIZEALL);
-        HCURSOR hNo = LoadCursor(NULL, IDC_NO);
-        HCURSOR hWait = LoadCursor(NULL, IDC_WAIT);
-        HCURSOR hAppStarting = LoadCursor(NULL, IDC_APPSTARTING);
-
-        while (g_AppRunning.load()) {
-            if (g_SessionActive) {
-                CURSORINFO ci = { sizeof(CURSORINFO) };
-                if (GetCursorInfo(&ci)) {
-                    bool visible = (ci.flags & CURSOR_SHOWING) != 0;
-                    POINT pt = ci.ptScreenPos;
-                    uint8_t shape = 0; // 0: default/arrow
-                    if (ci.hCursor == hIBeam) shape = 1;
-                    else if (ci.hCursor == hHand) shape = 2;
-                    else if (ci.hCursor == hSizeWE) shape = 3;
-                    else if (ci.hCursor == hSizeNS) shape = 4;
-                    else if (ci.hCursor == hSizeNWSE) shape = 5;
-                    else if (ci.hCursor == hSizeNESW) shape = 6;
-                    else if (ci.hCursor == hSizeAll) shape = 7;
-                    else if (ci.hCursor == hNo) shape = 8;
-                    else if (ci.hCursor == hWait || ci.hCursor == hAppStarting) shape = 9;
-
-                    int32_t ox = 0, oy = 0, bw = 0, bh = 0;
-                    capturer.GetMonitorBounds(ox, oy, bw, bh);
-                    if (bw <= 0) bw = GetSystemMetrics(SM_CXSCREEN);
-                    if (bh <= 0) bh = GetSystemMetrics(SM_CYSCREEN);
-
-                    if (pt.x != s_lastPt.x || pt.y != s_lastPt.y || shape != s_lastShape || visible != s_lastVisible) {
-                        s_lastPt = pt;
-                        s_lastShape = shape;
-                        s_lastVisible = visible;
-
-                        float normX = (bw > 0) ? static_cast<float>(pt.x - ox) / static_cast<float>(bw) : 0.f;
-                        float normY = (bh > 0) ? static_cast<float>(pt.y - oy) / static_cast<float>(bh) : 0.f;
-                        if (normX < 0.f) normX = 0.f; if (normX > 1.f) normX = 1.f;
-                        if (normY < 0.f) normY = 0.f; if (normY > 1.f) normY = 1.f;
-
-                        shared::CursorPositionMsg msg = { normX, normY, shape, visible };
-                        PushOutbound(shared::SerializeMessage(shared::MessageType::CursorPosition, msg), false);
-                    }
-                }
-            }
-            Sleep(16);
-        }
-    }).detach();
     std::thread([](){
         uint32_t ticks = 0;
         while(true){
@@ -1698,24 +1640,6 @@ static void DispatchClientMessage(gupt::shared::MessageType t, const std::vector
                 auto ref = gupt::shared::SerializeMessage(gupt::shared::MessageType::RefreshRequest, static_cast<uint8_t>(1));
                 PushEv(std::move(ref));
             }
-        }
-    } else if (t == gupt::shared::MessageType::CursorPosition) {
-        if (p.size() >= sizeof(gupt::shared::CursorPositionMsg)) {
-            const auto* cMsg = reinterpret_cast<const gupt::shared::CursorPositionMsg*>(p.data());
-            static HCURSOR s_shapes[10] = {
-                LoadCursor(NULL, IDC_ARROW),
-                LoadCursor(NULL, IDC_IBEAM),
-                LoadCursor(NULL, IDC_HAND),
-                LoadCursor(NULL, IDC_SIZEWE),
-                LoadCursor(NULL, IDC_SIZENS),
-                LoadCursor(NULL, IDC_SIZENWSE),
-                LoadCursor(NULL, IDC_SIZENESW),
-                LoadCursor(NULL, IDC_SIZEALL),
-                LoadCursor(NULL, IDC_NO),
-                LoadCursor(NULL, IDC_WAIT)
-            };
-            uint8_t sid = (cMsg->shapeId < 10) ? cMsg->shapeId : 0;
-            SetCursor(s_shapes[sid]);
         }
     } else if (t == gupt::shared::MessageType::FrameData) {
         ProcessFrame(p, hWnd);
