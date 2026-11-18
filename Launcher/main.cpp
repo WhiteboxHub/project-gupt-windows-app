@@ -308,7 +308,8 @@ static std::vector<std::string> GetConfiguredSignalingCandidates() {
 }
 
 static std::mutex g_FrameMutex, g_hostClipMtx, g_EvMtx, g_SendMtx, g_EncMtx;
-static std::vector<uint8_t> g_PendingFrame, g_RawQueue;
+static std::vector<uint8_t> g_RawQueue;
+static std::vector<std::vector<uint8_t>> g_FrameQueue;
 static uint32_t g_RawW=0, g_RawH=0;
 static uint32_t g_DirtyX=0, g_DirtyY=0, g_DirtyW=0, g_DirtyH=0;
 static bool g_HasDirtyBounds=false;
@@ -469,7 +470,12 @@ static void PushOutbound(std::vector<uint8_t> f, bool isUrgent) {
         } else if(isUrgent || f.size() < 400) {
             g_SendQueue.push_back(std::move(f));
         } else {
-            g_PendingFrame = std::move(f);
+            // Keep up to 4 video frames in FIFO to ensure differential frames are delivered in order without drops
+            if (g_FrameQueue.size() >= 4) {
+                g_FrameQueue.erase(g_FrameQueue.begin());
+                g_ForceFullScan = true; // Auto-heal ground truth if network ever drops a frame
+            }
+            g_FrameQueue.push_back(std::move(f));
         }
     }
     g_SendCv.notify_one();
@@ -699,12 +705,12 @@ static void HostEncoderLoop(gupt::core::capture::ScreenCapturer* capturer) {
 static void HostDeliveryLoop(gupt::core::network::TcpServer* srv) {
     while(true) {
         std::vector<std::vector<uint8_t>> cmds;
-        std::vector<uint8_t> frame;
+        std::vector<std::vector<uint8_t>> frames;
         {
             std::unique_lock<std::mutex> lk(g_SendMtx);
-            g_SendCv.wait(lk, []{ return !g_SendQueue.empty() || !g_PendingFrame.empty(); });
+            g_SendCv.wait(lk, []{ return !g_SendQueue.empty() || !g_FrameQueue.empty(); });
             cmds = std::move(g_SendQueue); g_SendQueue.clear();
-            frame = std::move(g_PendingFrame); g_PendingFrame.clear();
+            frames = std::move(g_FrameQueue); g_FrameQueue.clear();
         }
         for(auto& c : cmds) {
             auto pkt = MaybeEncryptOutbound(std::move(c));
@@ -716,17 +722,19 @@ static void HostDeliveryLoop(gupt::core::network::TcpServer* srv) {
             }
             else if(g_Relay.connected) g_Relay.Send(pkt.data(), (uint32_t)pkt.size());
         }
-        if(!frame.empty()) {
-            ULONGLONG t0 = GetTickCount64();
-            auto pkt = MaybeEncryptOutbound(std::move(frame));
-            if(srv->IsClientConnected()) srv->SendRaw(pkt);
-            else if(g_UsingP2P && g_P2PTransport.IsConnected()) {
-                if(!g_P2PTransport.Send(pkt.data(), pkt.size()) && g_Relay.connected) {
-                    g_Relay.Send(pkt.data(), (uint32_t)pkt.size());
+        for(auto& frame : frames) {
+            if(!frame.empty()) {
+                ULONGLONG t0 = GetTickCount64();
+                auto pkt = MaybeEncryptOutbound(std::move(frame));
+                if(srv->IsClientConnected()) srv->SendRaw(pkt);
+                else if(g_UsingP2P && g_P2PTransport.IsConnected()) {
+                    if(!g_P2PTransport.Send(pkt.data(), pkt.size()) && g_Relay.connected) {
+                        g_Relay.Send(pkt.data(), (uint32_t)pkt.size());
+                    }
                 }
+                else if(g_Relay.connected) g_Relay.Send(pkt.data(), (uint32_t)pkt.size());
+                g_HostLastSendDurationMs = static_cast<uint32_t>(GetTickCount64() - t0);
             }
-            else if(g_Relay.connected) g_Relay.Send(pkt.data(), (uint32_t)pkt.size());
-            g_HostLastSendDurationMs = static_cast<uint32_t>(GetTickCount64() - t0);
         }
     }
 }

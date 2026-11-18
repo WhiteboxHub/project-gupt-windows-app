@@ -27,9 +27,6 @@ const statusMsg = document.getElementById("status");
 const streamStatus = document.getElementById("streamStatus");
 const canvas = document.getElementById("screen");
 const ctx = canvas.getContext("2d", { alpha: false });
-const offscreenCanvas = document.createElement("canvas");
-const offscreenCtx = offscreenCanvas.getContext("2d", { alpha: false });
-let hasMasterFrame = false;
 
 const fullScreenBtn = document.getElementById("fullScreenBtn");
 const exitFullScreenBtn = document.getElementById("exitFullScreenBtn");
@@ -169,20 +166,12 @@ function setMode(nextMode) {
 
 function clearCanvas(message = "") {
   const dpr = window.devicePixelRatio || 1;
-  canvas.width = window.innerWidth * dpr;
-  canvas.height = window.innerHeight * dpr;
+  canvas.width = Math.max(1, Math.floor(window.innerWidth * dpr));
+  canvas.height = Math.max(1, Math.floor(window.innerHeight * dpr));
   ctx.fillStyle = "#0c0d14";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   remoteWidth = 0;
   remoteHeight = 0;
-  hasMasterFrame = false;
-  offscreenCanvas.width = 0;
-  offscreenCanvas.height = 0;
-  drawScale = 1;
-  drawScaleX = 1;
-  drawScaleY = 1;
-  drawX = 0;
-  drawY = 0;
 
   if (message) {
     ctx.save();
@@ -363,19 +352,11 @@ function handleClientMessage(event) {
         sendInput(encodeFrameAck(frameNumber));
       }
 
-      const isDelta = msg.payload.byteLength >= 41
-        ? (new DataView(msg.payload.buffer, msg.payload.byteOffset, msg.payload.byteLength).getUint8(32) !== 0)
-        : false;
-
-      if (!isDelta) {
-        // Full keyframe supersedes any older delta frames
-        pendingFrames = [msg.payload];
-      } else {
-        if (pendingFrames.length > 20) {
-          pendingFrames.shift();
-        }
-        pendingFrames.push(msg.payload);
+      // Preserve strict FIFO frame sequence
+      if (pendingFrames.length > 25) {
+        pendingFrames.shift();
       }
+      pendingFrames.push(msg.payload);
       processFrames().catch(err => console.error("Render loop error:", err));
     } else if (msg.type === MessageType.Disconnect) {
       disconnect();
@@ -475,23 +456,14 @@ function updateMetricsDisplay() {
   streamStatus.textContent = `Connected (${metricsFps} FPS • ${latencyStr} • ${metricsBitrate} Mbps)`;
 }
 
-function paintMasterBuffer() {
-  if (!canvas.width || !canvas.height) return;
-  // Always clear entire display canvas to solid black letterbox background
-  ctx.fillStyle = "#000";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  if (!remoteWidth || !remoteHeight || !hasMasterFrame || !offscreenCanvas.width || !offscreenCanvas.height) return;
-
-  const destW = Math.round(remoteWidth * drawScaleX);
-  const destH = Math.round(remoteHeight * drawScaleY);
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(
-    offscreenCanvas,
-    0, 0, remoteWidth, remoteHeight,
-    drawX, drawY, destW, destH
-  );
+function resizeCanvas() {
+  if (viewMode === "stretch") {
+    canvas.style.objectFit = "fill";
+  } else if (viewMode === "cover") {
+    canvas.style.objectFit = "cover";
+  } else {
+    canvas.style.objectFit = "contain";
+  }
 }
 
 async function renderFrame(payload) {
@@ -508,88 +480,30 @@ async function renderFrame(payload) {
       }
     }
 
-    let dimsChanged = false;
     if (frame.totalWidth !== remoteWidth || frame.totalHeight !== remoteHeight) {
       remoteWidth = frame.totalWidth;
       remoteHeight = frame.totalHeight;
-      offscreenCanvas.width = remoteWidth;
-      offscreenCanvas.height = remoteHeight;
-      offscreenCtx.fillStyle = "#000";
-      offscreenCtx.fillRect(0, 0, remoteWidth, remoteHeight);
-      dimsChanged = true;
+      canvas.width = remoteWidth;
+      canvas.height = remoteHeight;
+      resizeCanvas();
     }
 
     const blob = new Blob([frame.jpeg], { type: "image/jpeg" });
     const bitmap = await createImageBitmap(blob);
 
-    // 1. Paint decoded frame directly into unscaled master offscreen buffer at 1:1 pixel coordinates
-    offscreenCtx.drawImage(
+    // Blit frame directly onto native resolution canvas with zero intermediate copies or subpixel rounding
+    ctx.drawImage(
       bitmap,
       frame.targetX,
       frame.targetY,
       frame.updateWidth,
       frame.updateHeight
     );
-    hasMasterFrame = true;
-
-    // 2. If screen resolution changed or full keyframe arrived, re-letterbox entire screen
-    const isFullKeyframe = !frame.isDelta || (frame.updateWidth >= frame.totalWidth && frame.updateHeight >= frame.totalHeight);
-    if (dimsChanged || isFullKeyframe) {
-      resizeCanvas();
-    } else {
-      // Differential update: blit dirty rect directly onto display canvas
-      ctx.drawImage(
-        bitmap,
-        Math.round(drawX + frame.targetX * drawScaleX),
-        Math.round(drawY + frame.targetY * drawScaleY),
-        Math.round(frame.updateWidth * drawScaleX),
-        Math.round(frame.updateHeight * drawScaleY)
-      );
-    }
     bitmap.close();
   } catch (err) {
     console.error("RENDER ERROR:", err);
     throw err;
   }
-}
-
-function resizeCanvas() {
-  const dpr = window.devicePixelRatio || 1;
-  const newW = Math.max(1, Math.floor(window.innerWidth * dpr));
-  const newH = Math.max(1, Math.floor(window.innerHeight * dpr));
-
-  if (canvas.width !== newW || canvas.height !== newH) {
-    canvas.width = newW;
-    canvas.height = newH;
-  }
-
-  if (!remoteWidth || !remoteHeight) return;
-
-  const scaleX = canvas.width / remoteWidth;
-  const scaleY = canvas.height / remoteHeight;
-
-  if (viewMode === "stretch") {
-    drawScale = 1;
-    drawScaleX = scaleX;
-    drawScaleY = scaleY;
-    drawX = 0;
-    drawY = 0;
-  } else if (viewMode === "cover") {
-    drawScale = Math.max(scaleX, scaleY);
-    drawScaleX = drawScale;
-    drawScaleY = drawScale;
-    drawX = Math.floor((canvas.width - remoteWidth * drawScale) / 2);
-    drawY = Math.floor((canvas.height - remoteHeight * drawScale) / 2);
-  } else {
-    // "contain" (Fit Screen) - Clean letterbox without clipping
-    drawScale = Math.min(scaleX, scaleY);
-    drawScaleX = drawScale;
-    drawScaleY = drawScale;
-    drawX = Math.max(0, Math.floor((canvas.width - remoteWidth * drawScale) / 2));
-    drawY = Math.max(0, Math.floor((canvas.height - remoteHeight * drawScale) / 2));
-  }
-
-  paintMasterBuffer();
 }
 
 function sendInput(bytes) {
@@ -675,18 +589,54 @@ window.addEventListener("keyup", (event) => {
 });
 
 function normalizedPosition(event) {
+  if (!remoteWidth || !remoteHeight) return null;
   const rect = canvas.getBoundingClientRect();
-  if (!rect.width || !rect.height || !remoteWidth || !remoteHeight) return null;
+  if (!rect.width || !rect.height) return null;
 
-  // Convert viewport client coords into internal canvas buffer coords
-  const canvasX = (event.clientX - rect.left) * (canvas.width / rect.width);
-  const canvasY = (event.clientY - rect.top) * (canvas.height / rect.height);
-  const activeW = remoteWidth * drawScaleX;
-  const activeH = remoteHeight * drawScaleY;
-  if (activeW <= 0 || activeH <= 0) return null;
+  if (viewMode === "stretch") {
+    const x = (event.clientX - rect.left) / rect.width;
+    const y = (event.clientY - rect.top) / rect.height;
+    if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+    return { x, y };
+  }
 
-  const x = (canvasX - drawX) / activeW;
-  const y = (canvasY - drawY) / activeH;
+  const aspectContent = remoteWidth / remoteHeight;
+  const aspectElem = rect.width / rect.height;
+
+  let renderedW = rect.width;
+  let renderedH = rect.height;
+  let offsetX = 0;
+  let offsetY = 0;
+
+  if (viewMode === "cover") {
+    if (aspectElem > aspectContent) {
+      renderedW = rect.width;
+      renderedH = rect.width / aspectContent;
+      offsetY = (rect.height - renderedH) / 2;
+    } else {
+      renderedH = rect.height;
+      renderedW = rect.height * aspectContent;
+      offsetX = (rect.width - renderedW) / 2;
+    }
+  } else {
+    // "contain" (Fit Screen)
+    if (aspectElem > aspectContent) {
+      renderedH = rect.height;
+      renderedW = rect.height * aspectContent;
+      offsetX = (rect.width - renderedW) / 2;
+    } else {
+      renderedW = rect.width;
+      renderedH = rect.width / aspectContent;
+      offsetY = (rect.height - renderedH) / 2;
+    }
+  }
+
+  const clickX = event.clientX - rect.left - offsetX;
+  const clickY = event.clientY - rect.top - offsetY;
+
+  const x = clickX / renderedW;
+  const y = clickY / renderedH;
+
   if (x < 0 || x > 1 || y < 0 || y > 1) return null;
   return { x, y };
 }
