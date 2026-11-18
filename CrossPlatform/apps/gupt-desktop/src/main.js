@@ -490,7 +490,7 @@ async function renderFrame(payload) {
     }
 
     const blob = new Blob([frame.jpeg], { type: "image/jpeg" });
-    const bitmap = await createImageBitmap(blob, { premultiplyAlpha: "none" });
+    const bitmap = await createImageBitmap(blob);
 
     // Blit frame directly onto native resolution canvas with zero intermediate copies or subpixel rounding
     ctx.drawImage(

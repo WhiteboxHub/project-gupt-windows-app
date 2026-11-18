@@ -641,11 +641,11 @@ static void HostEncoderLoop(gupt::core::capture::ScreenCapturer* capturer) {
             if (g_UsingRelay || g_UsingP2P) {
                 uint32_t sent = g_HostLastSentFrameNum.load();
                 uint32_t acked = g_HostLastAckedFrameNum.load();
-                uint32_t maxInFlight = g_UsingP2P ? 8 : 6;
+                uint32_t maxInFlight = g_UsingP2P ? 5 : 4;
                 uint64_t nowTick = GetTickCount64();
                 // Flow control: If peer supports ACKs (acked > 0) and has too many in flight, pace gently
-                // Cap throttle at 16ms so it never starves 60 FPS video playback or long-haul international links
-                if (acked > 0 && sent > acked + maxInFlight && (nowTick - g_HostLastFrameSendTick.load() < 16)) {
+                // Cap throttle at 25ms to allow smooth playback without queuing or buffer bloat
+                if (acked > 0 && sent > acked + maxInFlight && (nowTick - g_HostLastFrameSendTick.load() < 25)) {
                     Sleep(2);
                     continue;
                 }
@@ -680,14 +680,14 @@ static void HostEncoderLoop(gupt::core::capture::ScreenCapturer* capturer) {
                 g_ForceFullScan = false;
             }
 
-            // High-Fidelity 4:4:4 Chroma Subsampling:
-            // Eliminates text blur and color artifacts across ChatGPT, Notepad, code editors, and video
-            // Default quality 93% for crisp legibility; adaptive floor 88% on heavy full-screen motion
+            // Dynamic Subsampling & Adaptive Quality:
+            // High-motion or large region updates (>25% screen) use 4:2:0 subsampling (~25-35KB/frame) for fluid 60 FPS video
+            // Small precision text/code regions use true 4:4:4 subsampling at quality 92 for razor-sharp legibility
             uint64_t regionPixels = static_cast<uint64_t>(targetW) * static_cast<uint64_t>(targetH);
             uint64_t screenPixels = static_cast<uint64_t>(w) * static_cast<uint64_t>(h);
-            bool isLargeVideo = regionPixels > (screenPixels / 3);
-            int quality = isLargeVideo ? 88 : 93;
-            bool force444 = true;
+            bool isLargeVideo = regionPixels > (screenPixels / 4);
+            int quality = isLargeVideo ? 72 : 92;
+            bool force444 = !isLargeVideo;
 
             std::vector<uint8_t> jpg;
             if(capturer->CaptureRegionJpeg(raw, w, h, targetX, targetY, targetW, targetH, jpg, quality, force444)) {
@@ -1136,123 +1136,6 @@ static void SendRelayP2PCandidateAsync() {
     }).detach();
 }
 
-static HWND g_hHostCardWnd = NULL;
-static HWND g_hHostCopyBtn = NULL;
-
-static LRESULT CALLBACK HostCardWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
-    switch (msg) {
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hWnd, &ps);
-        RECT r; GetClientRect(hWnd, &r);
-
-        // Dark background
-        HBRUSH brBg = CreateSolidBrush(RGB(15, 17, 26));
-        FillRect(hdc, &r, brBg);
-        DeleteObject(brBg);
-
-        // Top Accent Bar
-        HBRUSH brAccent = CreateSolidBrush(RGB(79, 70, 229));
-        RECT rBar = { 0, 0, r.right, 4 };
-        FillRect(hdc, &rBar, brAccent);
-        DeleteObject(brAccent);
-
-        // Active Status Dot
-        HBRUSH brDot = CreateSolidBrush(g_SessionActive ? RGB(16, 185, 129) : RGB(59, 130, 246));
-        HGDIOBJ oldBrush = SelectObject(hdc, brDot);
-        HGDIOBJ oldPen = SelectObject(hdc, GetStockObject(NULL_PEN));
-        Ellipse(hdc, 24, 22, 36, 34);
-        SelectObject(hdc, oldBrush);
-        SelectObject(hdc, oldPen);
-        DeleteObject(brDot);
-
-        // Title text
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, RGB(255, 255, 255));
-        HFONT hTitleFont = CreateFontA(18, 0, 0, 0, FW_BOLD, 0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI");
-        HFONT hOld = (HFONT)SelectObject(hdc, hTitleFont);
-        RECT rTitle = { 46, 18, r.right - 24, 40 };
-        DrawTextA(hdc, "Gupt Remote Desktop - Host Active", -1, &rTitle, DT_SINGLELINE | DT_VCENTER);
-
-        // Subtitle text
-        SetTextColor(hdc, RGB(156, 163, 175));
-        HFONT hSubFont = CreateFontA(13, 0, 0, 0, FW_NORMAL, 0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI");
-        SelectObject(hdc, hSubFont);
-        RECT rSub = { 24, 48, r.right - 24, 68 };
-        const char* statusStr = g_SessionActive ? "Remote Controller Connected & Active" : "Waiting for incoming controller connection...";
-        DrawTextA(hdc, statusStr, -1, &rSub, DT_SINGLELINE);
-
-        // Card Container for Session ID
-        RECT rCard = { 24, 76, r.right - 24, 186 };
-        HBRUSH brCard = CreateSolidBrush(RGB(24, 27, 40));
-        HPEN penBorder = CreatePen(PS_SOLID, 1, RGB(55, 65, 81));
-        HGDIOBJ oldCardBrush = SelectObject(hdc, brCard);
-        HGDIOBJ oldCardPen = SelectObject(hdc, penBorder);
-        RoundRect(hdc, rCard.left, rCard.top, rCard.right, rCard.bottom, 12, 12);
-        SelectObject(hdc, oldCardBrush);
-        SelectObject(hdc, oldCardPen);
-        DeleteObject(brCard);
-        DeleteObject(penBorder);
-
-        // Card Label
-        SetTextColor(hdc, RGB(129, 140, 248));
-        HFONT hLabelFont = CreateFontA(11, 0, 0, 0, FW_BOLD, 0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI");
-        SelectObject(hdc, hLabelFont);
-        RECT rLabel = { rCard.left + 16, rCard.top + 10, rCard.right - 16, rCard.top + 26 };
-        DrawTextA(hdc, "YOUR HOST SESSION ID", -1, &rLabel, DT_SINGLELINE | DT_CENTER);
-
-        // Large 36pt Bold Session ID Font
-        SetTextColor(hdc, RGB(255, 255, 255));
-        HFONT hIdFont = CreateFontA(36, 0, 0, 0, FW_BOLD, 0, 0, 0, 0, 0, 0, 0, 0, "Consolas");
-        SelectObject(hdc, hIdFont);
-        RECT rId = { rCard.left + 16, rCard.top + 34, rCard.right - 16, rCard.bottom - 10 };
-        DrawTextA(hdc, g_CurrentSessionId.c_str(), -1, &rId, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
-
-        // Footer note
-        SetTextColor(hdc, RGB(107, 114, 128));
-        HFONT hFootFont = CreateFontA(12, 0, 0, 0, FW_NORMAL, 0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI");
-        SelectObject(hdc, hFootFont);
-        RECT rFoot = { 24, 260, r.right - 24, 280 };
-        DrawTextA(hdc, "End-to-End Encrypted (ECDH P-256 + AES-GCM). Keep this window open.", -1, &rFoot, DT_SINGLELINE | DT_CENTER);
-
-        SelectObject(hdc, hOld);
-        DeleteObject(hTitleFont);
-        DeleteObject(hSubFont);
-        DeleteObject(hLabelFont);
-        DeleteObject(hIdFont);
-        DeleteObject(hFootFont);
-
-        EndPaint(hWnd, &ps);
-        return 0;
-    }
-    case WM_COMMAND: {
-        if (LOWORD(wp) == 1001) { // Copy Session ID Button
-            SafeSetClipboardText(g_CurrentSessionId);
-            if (g_hHostCopyBtn) SetWindowTextA(g_hHostCopyBtn, "Copied to Clipboard!");
-            SetTimer(hWnd, 1002, 2000, NULL);
-        }
-        return 0;
-    }
-    case WM_TIMER: {
-        if (wp == 1002) {
-            KillTimer(hWnd, 1002);
-            if (g_hHostCopyBtn) SetWindowTextA(g_hHostCopyBtn, "Copy Session ID");
-        }
-        return 0;
-    }
-    case WM_CLOSE: {
-        ShowWindow(hWnd, SW_MINIMIZE);
-        return 0; // Minimize instead of accidental exit
-    }
-    case WM_DESTROY: {
-        PostQuitMessage(0);
-        return 0;
-    }
-    default:
-        return DefWindowProcA(hWnd, msg, wp, lp);
-    }
-}
-
 static void HandleHostConnectRequest(
     const std::vector<uint8_t>& p,
     bool isRelay,
@@ -1260,7 +1143,6 @@ static void HandleHostConnectRequest(
     std::function<void(const std::vector<uint8_t>&)> sendFn)
 {
     g_SessionActive = true;
-    if (g_hHostCardWnd) InvalidateRect(g_hHostCardWnd, NULL, TRUE);
     if (isRelay) g_UsingRelay = true;
     g_HostLastRecvTick = GetTickCount64();
     shared::ConnectResponse res = {true, "OK"};
@@ -1369,7 +1251,6 @@ static void RunHostMode() {
                     g_SessionActive = false;
                     g_UsingP2P = false;
                     g_CryptoSession.Reset();
-                    if (g_hHostCardWnd) InvalidateRect(g_hHostCardWnd, NULL, TRUE);
                 }
                 else {
                     DispatchHostDataMessage(t, p, injector, capturer);
@@ -1392,7 +1273,6 @@ static void RunHostMode() {
         else if(t == shared::MessageType::Disconnect) {
             g_SessionActive = false;
             g_CryptoSession.Reset();
-            if (g_hHostCardWnd) InvalidateRect(g_hHostCardWnd, NULL, TRUE);
         }
         else {
             DispatchHostDataMessage(t, p, injector, capturer);
@@ -1505,44 +1385,10 @@ static void RunHostMode() {
     }).detach();
 
     if (!g_Headless) {
-        HINSTANCE hInst = GetModuleHandle(NULL);
-        WNDCLASSEXA wc = { sizeof(WNDCLASSEXA) };
-        wc.lpfnWndProc = HostCardWndProc;
-        wc.hInstance = hInst;
-        wc.lpszClassName = "GuptHostCard";
-        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-        wc.hIcon = (HICON)LoadImageA(hInst, MAKEINTRESOURCEA(101), IMAGE_ICON, 32, 32, 0);
-        RegisterClassExA(&wc);
-
-        int cardW = 500;
-        int cardH = 320;
-        int cardX = (GetSystemMetrics(SM_CXSCREEN) - cardW) / 2;
-        int cardY = (GetSystemMetrics(SM_CYSCREEN) - cardH) / 2;
-
-        g_hHostCardWnd = CreateWindowExA(
-            WS_EX_APPWINDOW,
-            "GuptHostCard", "Gupt Host - Active Session",
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE,
-            cardX, cardY, cardW, cardH,
-            NULL, NULL, hInst, NULL
-        );
-
-        g_hHostCopyBtn = CreateWindowExA(
-            0, "BUTTON", "Copy Session ID",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-            (cardW - 220) / 2, 202, 220, 44,
-            g_hHostCardWnd, (HMENU)1001, hInst, NULL
-        );
-        HFONT hBtnFont = CreateFontA(15, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, 0, 0, 0, 0, 0, "Segoe UI");
-        SendMessage(g_hHostCopyBtn, WM_SETFONT, (WPARAM)hBtnFont, TRUE);
-    }
-
-    MSG msg;
-    while(GetMessage(&msg, NULL, 0, 0)) {
-        TranslateMessage(&msg);
-        DispatchMessage(&msg);
+        MessageBoxA(NULL, ("Gupt Host is active!\n\nSession ID: " + g_CurrentSessionId).c_str(), "Gupt", MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST);
     }
     g_ActiveLanServer = nullptr;
+    ExitProcess(0);
 }
 struct ClientFrameTask {
     std::vector<uint8_t> data;
@@ -2415,7 +2261,7 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE, LPSTR, int) {
 
     if(!g_Launched) return 0;
     if(g_LaunchAsHost) RunHostMode(); else RunClientMode(h);
-    return 0;
+    ExitProcess(0);
 }
 
 

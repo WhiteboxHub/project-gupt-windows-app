@@ -508,24 +508,12 @@ bool ScreenCapturer::CaptureRegionJpeg(const std::vector<uint8_t>& rawPixels, ui
     pEncoder->Commit();
 
     STATSTG stg;
-    if (SUCCEEDED(pStream->Stat(&stg, STATFLAG_NONAME)) && stg.cbSize.LowPart > 0) {
-        HGLOBAL hMem = NULL;
-        if (SUCCEEDED(GetHGlobalFromStream(pStream, &hMem)) && hMem) {
-            void* pSrc = GlobalLock(hMem);
-            if (pSrc) {
-                outJpeg.resize(stg.cbSize.LowPart);
-                memcpy(outJpeg.data(), pSrc, stg.cbSize.LowPart);
-                GlobalUnlock(hMem);
-            }
-        }
-        if (outJpeg.empty()) {
-            outJpeg.resize(stg.cbSize.LowPart);
-            LARGE_INTEGER li = { 0 };
-            pStream->Seek(li, STREAM_SEEK_SET, NULL);
-            ULONG rb = 0;
-            pStream->Read(outJpeg.data(), (ULONG)outJpeg.size(), &rb);
-        }
-    }
+    pStream->Stat(&stg, STATFLAG_NONAME);
+    outJpeg.resize(stg.cbSize.LowPart);
+    LARGE_INTEGER li = { 0 };
+    pStream->Seek(li, STREAM_SEEK_SET, NULL);
+    ULONG rb = 0;
+    pStream->Read(outJpeg.data(), (ULONG)outJpeg.size(), &rb);
 
     if (pProp) pProp->Release();
     pFrame->Release();
