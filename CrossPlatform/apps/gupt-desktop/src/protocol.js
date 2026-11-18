@@ -10,6 +10,7 @@ export const MessageType = Object.freeze({
   ClipboardImage: 9,
   RefreshRequest: 10,
   FrameAck: 11,
+  CursorPosition: 19,
 });
 
 const HEADER_SIZE = 5;
@@ -119,6 +120,27 @@ export function decodeFrame(payload) {
     timestampMs: Number(view.getBigUint64(33, true)),
     jpeg: payload.slice(FRAME_HEADER_SIZE),
   };
+}
+
+export function decodeCursorPosition(payload) {
+  if (payload.byteLength < 10) return null;
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  return {
+    x: view.getFloat32(0, true),
+    y: view.getFloat32(4, true),
+    shapeId: view.getUint8(8),
+    isVisible: view.getUint8(9) !== 0,
+  };
+}
+
+export function encodeCursorPosition(x, y, shapeId, isVisible = true) {
+  const payload = new Uint8Array(10);
+  const view = new DataView(payload.buffer);
+  view.setFloat32(0, clamp01(x), true);
+  view.setFloat32(4, clamp01(y), true);
+  view.setUint8(8, shapeId);
+  view.setUint8(9, isVisible ? 1 : 0);
+  return encodeMessage(MessageType.CursorPosition, payload);
 }
 
 function encodeMouseEvent(normalizedX, normalizedY, buttonId, isDown, wheelDelta) {

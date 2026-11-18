@@ -13,6 +13,7 @@ import {
   encodeMouseButton,
   encodeMouseMove,
   encodeMouseWheel,
+  decodeCursorPosition,
 } from "./protocol.js";
 
 const SIGNALING_HOST = "gupt-signal-server-560359652969.us-central1.run.app";
@@ -40,6 +41,33 @@ const freezeBanner = document.getElementById("freezeBanner");
 const freezeBannerText = document.getElementById("freezeBannerText");
 const bannerReconnectBtn = document.getElementById("bannerReconnectBtn");
 const refreshStreamBtn = document.getElementById("refreshStreamBtn");
+const remoteCursor = document.getElementById("remoteCursor");
+const connectToast = document.getElementById("connectToast");
+const toastText = document.getElementById("toastText");
+
+const CURSOR_MAP = [
+  "default",
+  "text",
+  "pointer",
+  "ew-resize",
+  "ns-resize",
+  "nwse-resize",
+  "nesw-resize",
+  "move",
+  "not-allowed",
+  "wait",
+];
+
+let toastTimer = null;
+function showConnectToast(msg) {
+  if (!connectToast || !toastText) return;
+  toastText.textContent = msg;
+  connectToast.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    connectToast.hidden = true;
+  }, 4500);
+}
 
 let activeSessionId = "";
 let lastFrameReceivedAt = 0;
@@ -351,6 +379,27 @@ function handleClientMessage(event) {
       } else {
         lastFrameReceivedAt = Date.now();
         if (freezeBanner) freezeBanner.hidden = true;
+        showConnectToast(`Connected to Host (${activeSessionId || sessionInput.value.trim()}) — Remote Control Active`);
+      }
+    } else if (msg.type === MessageType.CursorPosition) {
+      const cursor = decodeCursorPosition(msg.payload);
+      if (cursor) {
+        const shape = CURSOR_MAP[cursor.shapeId] || "default";
+        canvas.style.cursor = shape;
+
+        if (remoteCursor && remoteWidth > 0 && remoteHeight > 0 && canvas.width > 0 && canvas.height > 0) {
+          if (!cursor.isVisible) {
+            remoteCursor.hidden = true;
+          } else {
+            const rect = canvas.getBoundingClientRect();
+            const pixelX = drawX + cursor.x * (remoteWidth * drawScaleX);
+            const pixelY = drawY + cursor.y * (remoteHeight * drawScaleY);
+            const domX = (pixelX / canvas.width) * rect.width;
+            const domY = (pixelY / canvas.height) * rect.height;
+            remoteCursor.style.transform = `translate(${domX}px, ${domY}px)`;
+            remoteCursor.hidden = false;
+          }
+        }
       }
     } else if (msg.type === MessageType.FrameData) {
       isSessionConnected = true;
@@ -735,6 +784,9 @@ function disconnect() {
   // 6. Close sidebar & hide freeze alerts
   if (sidebar) sidebar.classList.remove("open");
   if (freezeBanner) freezeBanner.hidden = true;
+  if (remoteCursor) remoteCursor.hidden = true;
+  if (connectToast) connectToast.hidden = true;
+  canvas.style.cursor = "default";
   streamStatus.textContent = "Disconnected";
   statusEl.textContent = "Ready to connect. Enter a new session ID.";
 

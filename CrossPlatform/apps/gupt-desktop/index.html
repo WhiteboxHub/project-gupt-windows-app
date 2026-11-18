@@ -57,6 +57,21 @@
       <section id="viewer" hidden>
         <canvas id="screen"></canvas>
 
+        <!-- Remote Host Shared Cursor Overlay -->
+        <div id="remoteCursor" class="remote-cursor" hidden>
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M4 2L11 20L14 13L21 10L4 2Z" fill="#6366f1" stroke="#ffffff" stroke-width="2" stroke-linejoin="round"/>
+          </svg>
+        </div>
+
+        <!-- Connection Acknowledgement Toast Banner -->
+        <div id="connectToast" class="connect-toast" hidden>
+          <div class="toast-content">
+            <span class="toast-dot"></span>
+            <span id="toastText">Connected to Host — Full Remote Control Active</span>
+          </div>
+        </div>
+
         <!-- Freeze / Disconnect Alert Banner -->
         <div id="freezeBanner" class="freeze-banner" hidden>
           <div class="freeze-content">

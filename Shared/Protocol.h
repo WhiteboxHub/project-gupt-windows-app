@@ -25,7 +25,8 @@ enum class MessageType : uint8_t {
     SecureDesktopNotification = 15, // Host notifying client that UAC / Secure Desktop is active
     KeyExchange = 16,    // Ephemeral ECDH P-256 X9.63 public key exchange for E2EE
     EncryptedPayload = 17, // AES-256-GCM authenticated encrypted payload wrapper
-    MonitorInfo = 18     // Host reporting active monitor index and total display count
+    MonitorInfo = 18,    // Host reporting active monitor index and total display count
+    CursorPosition = 19  // Host reporting active cursor position and shape for unified single-mouse sync
 };
 
 #pragma pack(push, 1) // Ensure no padding for raw struct serialization
@@ -106,6 +107,13 @@ struct KeyExchangeMsg {
 struct MonitorInfoMsg {
     uint32_t activeIndex;
     uint32_t monitorCount;
+};
+
+struct CursorPositionMsg {
+    float x;           // 0.0 to 1.0 (normalized)
+    float y;           // 0.0 to 1.0 (normalized)
+    uint8_t shapeId;   // 0: default, 1: text, 2: pointer, 3: ew-resize, 4: ns-resize, 5: nwse-resize, 6: nesw-resize, 7: move, 8: not-allowed, 9: wait
+    bool isVisible;
 };
 
 #pragma pack(pop)
