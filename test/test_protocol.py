@@ -18,7 +18,12 @@ from protocol import (
     parse_frame,
     serialize_audio,
     parse_audio,
-    serialize_clipboard_text
+    serialize_clipboard_text,
+    serialize_webrtc_offer,
+    serialize_webrtc_answer,
+    parse_webrtc_sdp,
+    serialize_webrtc_candidate,
+    parse_webrtc_candidate
 )
 
 class TestProtocol(unittest.TestCase):
@@ -107,6 +112,60 @@ class TestProtocol(unittest.TestCase):
         self.assertEqual(parsed["channels"], 2)
         self.assertEqual(parsed["bitsPerSample"], 16)
         self.assertEqual(parsed["pcmData"], dummy_pcm)
+
+    def test_webrtc_offer(self):
+        sdp = "v=0\r\no=- 42000 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n"
+        pkt = serialize_webrtc_offer("sess_4120", "host", sdp)
+        msgs = deserialize_messages(pkt)
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0][0], MessageType.WebRtcOffer)
+        parsed = parse_webrtc_sdp(msgs[0][1])
+        self.assertEqual(parsed["sessionId"], "sess_4120")
+        self.assertEqual(parsed["role"], "host")
+        self.assertEqual(parsed["sdp"], sdp)
+
+    def test_webrtc_answer(self):
+        sdp = "v=0\r\no=- 42001 2 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n"
+        pkt = serialize_webrtc_answer("sess_4120", "controller", sdp)
+        msgs = deserialize_messages(pkt)
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0][0], MessageType.WebRtcAnswer)
+        parsed = parse_webrtc_sdp(msgs[0][1])
+        self.assertEqual(parsed["sessionId"], "sess_4120")
+        self.assertEqual(parsed["role"], "controller")
+        self.assertEqual(parsed["sdp"], sdp)
+
+    def test_webrtc_candidate(self):
+        cand = "candidate:842163049 1 udp 1677729535 192.168.1.15 50000 typ host"
+        pkt = serialize_webrtc_candidate("sess_4120", "host", "0", 0, "ufragXYZ", cand)
+        msgs = deserialize_messages(pkt)
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0][0], MessageType.WebRtcCandidate)
+        parsed = parse_webrtc_candidate(msgs[0][1])
+        self.assertEqual(parsed["sessionId"], "sess_4120")
+        self.assertEqual(parsed["role"], "host")
+        self.assertEqual(parsed["sdpMid"], "0")
+        self.assertEqual(parsed["sdpMLineIndex"], 0)
+        self.assertEqual(parsed["ufrag"], "ufragXYZ")
+        self.assertEqual(parsed["candidate"], cand)
+
+    def test_webrtc_malformed_rejection(self):
+        # Truncated payload less than header size
+        with self.assertRaises(ValueError):
+            parse_webrtc_sdp(b"\x00" * 20)
+        with self.assertRaises(ValueError):
+            parse_webrtc_candidate(b"\x00" * 50)
+
+    def test_webrtc_oversized_rejection(self):
+        # Oversized SDP > 64KB
+        huge_sdp = "a=test\r\n" * 15000 # ~120KB
+        with self.assertRaises(ValueError):
+            serialize_webrtc_offer("sess_4120", "host", huge_sdp)
+
+        # Oversized candidate > 8KB
+        huge_cand = "candidate:foo " * 1000 # ~14KB
+        with self.assertRaises(ValueError):
+            serialize_webrtc_candidate("sess_4120", "host", "0", 0, "", huge_cand)
 
 if __name__ == '__main__':
     unittest.main()

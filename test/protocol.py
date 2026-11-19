@@ -18,6 +18,15 @@ class MessageType(IntEnum):
     RefreshRequest = 10
     FrameAck = 11
     AudioData = 12
+    P2PCandidate = 13
+    SwitchMonitor = 14
+    SecureDesktopNotification = 15
+    KeyExchange = 16
+    EncryptedPayload = 17
+    MonitorInfo = 18
+    WebRtcOffer = 19
+    WebRtcAnswer = 20
+    WebRtcCandidate = 21
 
 # Header: uint8_t type + uint32_t payloadSize (packed, little-endian)
 HEADER_FORMAT = "<BI"
@@ -146,4 +155,83 @@ def parse_frame_ack(payload: bytes):
     if len(payload) < 4:
         raise ValueError("Payload too short for FrameAck")
     return {"frameNumber": struct.unpack("<I", payload[:4])[0]}
+
+# WebRTC Signaling formats
+WEBRTC_SDP_HDR_FORMAT = "<32s16sI"
+WEBRTC_SDP_HDR_SIZE = struct.calcsize(WEBRTC_SDP_HDR_FORMAT)
+
+WEBRTC_CANDIDATE_HDR_FORMAT = "<32s16s32si32sI"
+WEBRTC_CANDIDATE_HDR_SIZE = struct.calcsize(WEBRTC_CANDIDATE_HDR_FORMAT)
+
+def serialize_webrtc_offer(session_id: str, role: str, sdp: str) -> bytes:
+    sdp_bytes = sdp.encode('utf-8')
+    if len(sdp_bytes) > 65536:
+        raise ValueError("SDP string exceeds 64KB limit")
+    hdr = struct.pack(
+        WEBRTC_SDP_HDR_FORMAT,
+        session_id.encode('utf-8')[:31].ljust(32, b'\x00'),
+        role.encode('utf-8')[:15].ljust(16, b'\x00'),
+        len(sdp_bytes)
+    )
+    return serialize_message(MessageType.WebRtcOffer, hdr + sdp_bytes)
+
+def serialize_webrtc_answer(session_id: str, role: str, sdp: str) -> bytes:
+    sdp_bytes = sdp.encode('utf-8')
+    if len(sdp_bytes) > 65536:
+        raise ValueError("SDP string exceeds 64KB limit")
+    hdr = struct.pack(
+        WEBRTC_SDP_HDR_FORMAT,
+        session_id.encode('utf-8')[:31].ljust(32, b'\x00'),
+        role.encode('utf-8')[:15].ljust(16, b'\x00'),
+        len(sdp_bytes)
+    )
+    return serialize_message(MessageType.WebRtcAnswer, hdr + sdp_bytes)
+
+def parse_webrtc_sdp(payload: bytes):
+    if len(payload) < WEBRTC_SDP_HDR_SIZE:
+        raise ValueError(f"Payload too short for WebRtcSdpHeader: {len(payload)}")
+    sess_raw, role_raw, sdp_len = struct.unpack(WEBRTC_SDP_HDR_FORMAT, payload[:WEBRTC_SDP_HDR_SIZE])
+    if sdp_len > 65536 or WEBRTC_SDP_HDR_SIZE + sdp_len > len(payload):
+        raise ValueError(f"Invalid sdpLen in WebRtcSdp: {sdp_len}")
+    session_id = sess_raw.rstrip(b'\x00').decode('utf-8', errors='replace')
+    role = role_raw.rstrip(b'\x00').decode('utf-8', errors='replace')
+    sdp = payload[WEBRTC_SDP_HDR_SIZE : WEBRTC_SDP_HDR_SIZE + sdp_len].decode('utf-8', errors='replace')
+    return {"sessionId": session_id, "role": role, "sdp": sdp}
+
+def serialize_webrtc_candidate(session_id: str, role: str, sdp_mid: str, sdp_mline_index: int, ufrag: str, candidate: str) -> bytes:
+    cand_bytes = candidate.encode('utf-8')
+    if len(cand_bytes) > 8192:
+        raise ValueError("Candidate string exceeds 8KB limit")
+    hdr = struct.pack(
+        WEBRTC_CANDIDATE_HDR_FORMAT,
+        session_id.encode('utf-8')[:31].ljust(32, b'\x00'),
+        role.encode('utf-8')[:15].ljust(16, b'\x00'),
+        sdp_mid.encode('utf-8')[:31].ljust(32, b'\x00'),
+        int(sdp_mline_index),
+        ufrag.encode('utf-8')[:31].ljust(32, b'\x00'),
+        len(cand_bytes)
+    )
+    return serialize_message(MessageType.WebRtcCandidate, hdr + cand_bytes)
+
+def parse_webrtc_candidate(payload: bytes):
+    if len(payload) < WEBRTC_CANDIDATE_HDR_SIZE:
+        raise ValueError(f"Payload too short for WebRtcCandidateHeader: {len(payload)}")
+    sess_raw, role_raw, mid_raw, mline_idx, ufrag_raw, cand_len = struct.unpack(
+        WEBRTC_CANDIDATE_HDR_FORMAT, payload[:WEBRTC_CANDIDATE_HDR_SIZE]
+    )
+    if cand_len > 8192 or WEBRTC_CANDIDATE_HDR_SIZE + cand_len > len(payload):
+        raise ValueError(f"Invalid candidateLen in WebRtcCandidate: {cand_len}")
+    session_id = sess_raw.rstrip(b'\x00').decode('utf-8', errors='replace')
+    role = role_raw.rstrip(b'\x00').decode('utf-8', errors='replace')
+    sdp_mid = mid_raw.rstrip(b'\x00').decode('utf-8', errors='replace')
+    ufrag = ufrag_raw.rstrip(b'\x00').decode('utf-8', errors='replace')
+    candidate = payload[WEBRTC_CANDIDATE_HDR_SIZE : WEBRTC_CANDIDATE_HDR_SIZE + cand_len].decode('utf-8', errors='replace')
+    return {
+        "sessionId": session_id,
+        "role": role,
+        "sdpMid": sdp_mid,
+        "sdpMLineIndex": mline_idx,
+        "ufrag": ufrag,
+        "candidate": candidate
+    }
 

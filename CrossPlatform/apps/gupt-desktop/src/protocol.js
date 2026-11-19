@@ -10,10 +10,22 @@ export const MessageType = Object.freeze({
   ClipboardImage: 9,
   RefreshRequest: 10,
   FrameAck: 11,
+  AudioData: 12,
+  P2PCandidate: 13,
+  SwitchMonitor: 14,
+  SecureDesktopNotification: 15,
+  KeyExchange: 16,
+  EncryptedPayload: 17,
+  MonitorInfo: 18,
+  WebRtcOffer: 19,
+  WebRtcAnswer: 20,
+  WebRtcCandidate: 21,
 });
 
 const HEADER_SIZE = 5;
 const FRAME_HEADER_SIZE = 41;
+const WEBRTC_SDP_HEADER_SIZE = 52;
+const WEBRTC_CANDIDATE_HEADER_SIZE = 120;
 
 export function encodeMessage(type, payload = new Uint8Array()) {
   const out = new Uint8Array(HEADER_SIZE + payload.byteLength);
@@ -144,4 +156,74 @@ function writeAscii(bytes, offset, length, value) {
 function clamp01(value) {
   if (!Number.isFinite(value)) return 0;
   return Math.max(0, Math.min(1, value));
+}
+
+function readAscii(bytes, offset, length) {
+  let end = offset;
+  const limit = offset + length;
+  while (end < limit && bytes[end] !== 0) {
+    end++;
+  }
+  return new TextDecoder().decode(bytes.subarray(offset, end));
+}
+
+export function encodeWebRtcOffer(sessionId, role, sdp) {
+  return encodeWebRtcSdp(MessageType.WebRtcOffer, sessionId, role, sdp);
+}
+
+export function encodeWebRtcAnswer(sessionId, role, sdp) {
+  return encodeWebRtcSdp(MessageType.WebRtcAnswer, sessionId, role, sdp);
+}
+
+function encodeWebRtcSdp(type, sessionId, role, sdp) {
+  const sdpBytes = new TextEncoder().encode(String(sdp ?? ""));
+  if (sdpBytes.byteLength > 65536) throw new Error("SDP string exceeds 64KB limit");
+  const payload = new Uint8Array(WEBRTC_SDP_HEADER_SIZE + sdpBytes.byteLength);
+  writeAscii(payload, 0, 32, sessionId);
+  writeAscii(payload, 32, 16, role);
+  new DataView(payload.buffer).setUint32(48, sdpBytes.byteLength, true);
+  payload.set(sdpBytes, WEBRTC_SDP_HEADER_SIZE);
+  return encodeMessage(type, payload);
+}
+
+export function decodeWebRtcSdp(payload) {
+  if (!payload || payload.byteLength < WEBRTC_SDP_HEADER_SIZE) return null;
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  const sdpLen = view.getUint32(48, true);
+  if (sdpLen > 65536 || WEBRTC_SDP_HEADER_SIZE + sdpLen > payload.byteLength) return null;
+
+  const sessionId = readAscii(payload, 0, 32);
+  const role = readAscii(payload, 32, 16);
+  const sdp = new TextDecoder().decode(payload.subarray(WEBRTC_SDP_HEADER_SIZE, WEBRTC_SDP_HEADER_SIZE + sdpLen));
+  return { sessionId, role, sdp };
+}
+
+export function encodeWebRtcCandidate(sessionId, role, sdpMid, sdpMLineIndex, ufrag, candidate) {
+  const candBytes = new TextEncoder().encode(String(candidate ?? ""));
+  if (candBytes.byteLength > 8192) throw new Error("Candidate string exceeds 8KB limit");
+  const payload = new Uint8Array(WEBRTC_CANDIDATE_HEADER_SIZE + candBytes.byteLength);
+  writeAscii(payload, 0, 32, sessionId);
+  writeAscii(payload, 32, 16, role);
+  writeAscii(payload, 48, 32, sdpMid ?? "");
+  const view = new DataView(payload.buffer);
+  view.setInt32(80, typeof sdpMLineIndex === "number" ? sdpMLineIndex : -1, true);
+  writeAscii(payload, 84, 32, ufrag ?? "");
+  view.setUint32(116, candBytes.byteLength, true);
+  payload.set(candBytes, WEBRTC_CANDIDATE_HEADER_SIZE);
+  return encodeMessage(MessageType.WebRtcCandidate, payload);
+}
+
+export function decodeWebRtcCandidate(payload) {
+  if (!payload || payload.byteLength < WEBRTC_CANDIDATE_HEADER_SIZE) return null;
+  const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+  const candLen = view.getUint32(116, true);
+  if (candLen > 8192 || WEBRTC_CANDIDATE_HEADER_SIZE + candLen > payload.byteLength) return null;
+
+  const sessionId = readAscii(payload, 0, 32);
+  const role = readAscii(payload, 32, 16);
+  const sdpMid = readAscii(payload, 48, 32);
+  const sdpMLineIndex = view.getInt32(80, true);
+  const ufrag = readAscii(payload, 84, 32);
+  const candidate = new TextDecoder().decode(payload.subarray(WEBRTC_CANDIDATE_HEADER_SIZE, WEBRTC_CANDIDATE_HEADER_SIZE + candLen));
+  return { sessionId, role, sdpMid, sdpMLineIndex, ufrag, candidate };
 }
