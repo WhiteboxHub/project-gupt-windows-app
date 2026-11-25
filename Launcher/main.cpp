@@ -175,6 +175,9 @@ static uint16_t g_LanPort = GetConfiguredLanPort();
 static std::atomic<uint32_t> g_HostMonitorCount{1};
 static gupt::core::network::TcpServer* g_ActiveLanServer = nullptr;
 static std::string g_CurrentSessionId = "";
+static std::string g_HostSecret = "";
+static std::string g_PairingPin = "";
+static std::string g_ClientPin = "";
 static std::string g_HostIp = "";
 static bool g_LaunchAsHost = false;
 static int g_Launched = 0;
@@ -185,6 +188,19 @@ static std::atomic<bool> g_UsingP2P{false};
 static std::atomic<bool> g_SidebarOpen{false};
 static std::atomic<bool> g_IsFullscreen{false};
 static std::atomic<bool> g_SessionActive{false};
+static std::atomic<bool> g_HostApproved{false};
+static std::atomic<bool> g_HostApprovalPending{false};
+static HWND g_HostUiHwnd = NULL;
+static constexpr UINT WM_GUPT_HOST_APPROVAL = WM_APP + 1;
+
+struct PendingApprovalState {
+    bool active = false;
+    bool isRelay = false;
+    core::capture::ScreenCapturer* capturer = nullptr;
+    std::function<void(const std::vector<uint8_t>&)> sendFn;
+};
+static std::mutex g_PendingApprovalMtx;
+static PendingApprovalState g_PendingApproval;
 static std::atomic<bool> g_ClipboardSyncEnabled{true};
 static core::network::UdpP2PTransport g_P2PTransport;
 static std::atomic<bool> g_DeliveryBusy{false};
@@ -406,6 +422,18 @@ public:
         std::lock_guard<std::mutex> lk(sendMtx);
         if(!connected || !hWS) return false;
         DWORD r = WinHttpWebSocketSend(hWS, WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE, const_cast<void*>(data), len);
+        if(r != 0) {
+            connected = false;
+            return false;
+        }
+        return true;
+    }
+
+    bool SendText(const std::string& text) {
+        if(!connected) return false;
+        std::lock_guard<std::mutex> lk(sendMtx);
+        if(!connected || !hWS) return false;
+        DWORD r = WinHttpWebSocketSend(hWS, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE, const_cast<void*>(text.data()), static_cast<DWORD>(text.size()));
         if(r != 0) {
             connected = false;
             return false;
@@ -1078,6 +1106,9 @@ static void DispatchHostDataMessage(
     }
 
     if (t == shared::MessageType::KeyExchange) {
+        if (!g_SessionActive.load() || !g_HostApproved.load()) {
+            return;
+        }
         if (p.size() >= sizeof(shared::KeyExchangeMsg)) {
             const auto* kx = reinterpret_cast<const shared::KeyExchangeMsg*>(p.data());
             if (g_CryptoSession.DeriveSharedSecret(kx->publicKey, kx->publicKeyLen)) {
@@ -1087,6 +1118,9 @@ static void DispatchHostDataMessage(
                 capturer.RequestKeyframe();
             }
         }
+    } else if (!g_SessionActive.load() || !g_HostApproved.load()) {
+        // Strict authorization gate: reject all remote commands before approval or after disconnect
+        return;
     } else if (t == shared::MessageType::MouseEvent) {
         if (p.size() >= sizeof(shared::MouseEvent)) {
             injector.IngestMouseEvent(*reinterpret_cast<const shared::MouseEvent*>(p.data()));
@@ -1136,22 +1170,60 @@ static void SendRelayP2PCandidateAsync() {
     }).detach();
 }
 
+static std::string ExtractJsonField(const std::string& json, const std::string& key) {
+    std::string pattern = "\"" + key + "\":\"";
+    size_t pos = json.find(pattern);
+    if (pos == std::string::npos) return "";
+    size_t start = pos + pattern.size();
+    size_t end = json.find("\"", start);
+    if (end == std::string::npos) return "";
+    return json.substr(start, end - start);
+}
+
+static bool SendRelayAuth(const std::string& role, const std::string& sessionId, const std::string& secretOrPin) {
+    std::string key = (role == "host") ? "hostSecret" : "pin";
+    std::string payload = "{\"type\":\"relay_auth\",\"role\":\"" + role + "\",\"sessionId\":\"" + sessionId + "\",\"" + key + "\":\"" + secretOrPin + "\"}";
+    return g_Relay.SendText(payload);
+}
+
 static void HandleHostConnectRequest(
     const std::vector<uint8_t>& p,
     bool isRelay,
     core::capture::ScreenCapturer& capturer,
     std::function<void(const std::vector<uint8_t>&)> sendFn)
 {
-    g_SessionActive = true;
-    if (isRelay) g_UsingRelay = true;
-    g_HostLastRecvTick = GetTickCount64();
-    shared::ConnectResponse res = {true, "OK"};
-    sendFn(shared::SerializeMessage(shared::MessageType::ConnectResponse, res));
-    sendFn(MakeKeyExchangePacket());
-    g_ForceFullScan = true;
-    capturer.RequestKeyframe();
-    if (isRelay) SendRelayP2PCandidateAsync();
-    GuptLog("Host accepted client connection for session %s (immediate access)", g_CurrentSessionId.c_str());
+    if (g_SessionActive.load() && g_HostApproved.load()) {
+        shared::ConnectResponse busy = {false, "Session already active"};
+        sendFn(shared::SerializeMessage(shared::MessageType::ConnectResponse, busy));
+        return;
+    }
+
+    if (g_HostApprovalPending.exchange(true)) {
+        shared::ConnectResponse pending = {false, "Approval already pending"};
+        sendFn(shared::SerializeMessage(shared::MessageType::ConnectResponse, pending));
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lk(g_PendingApprovalMtx);
+        g_PendingApproval.active = true;
+        g_PendingApproval.isRelay = isRelay;
+        g_PendingApproval.capturer = &capturer;
+        g_PendingApproval.sendFn = sendFn;
+    }
+
+    if (g_HostUiHwnd && PostMessageA(g_HostUiHwnd, WM_GUPT_HOST_APPROVAL, 0, 0)) {
+        GuptLog("Host queued connection approval prompt on UI thread for session %s", g_CurrentSessionId.c_str());
+    } else {
+        // Fail closed if UI thread window is unavailable
+        g_HostApprovalPending = false;
+        {
+            std::lock_guard<std::mutex> lk(g_PendingApprovalMtx);
+            g_PendingApproval.active = false;
+        }
+        shared::ConnectResponse res = {false, "Host UI unavailable"};
+        sendFn(shared::SerializeMessage(shared::MessageType::ConnectResponse, res));
+    }
 }
 
 static void RunHostMode() {
@@ -1173,14 +1245,12 @@ static void RunHostMode() {
         }
     });
     std::string json = HttpGet("/register");
-    size_t pos = json.find("sessionId\":\"");
-    if(pos != std::string::npos){
-        g_CurrentSessionId = json.substr(pos + 12);
-        size_t end = g_CurrentSessionId.find("\"");
-        if(end != std::string::npos) g_CurrentSessionId = g_CurrentSessionId.substr(0, end);
-    } else g_CurrentSessionId = "ERROR";
+    g_CurrentSessionId = ExtractJsonField(json, "sessionId");
+    g_HostSecret = ExtractJsonField(json, "hostSecret");
+    g_PairingPin = ExtractJsonField(json, "pairingPin");
+    if (g_CurrentSessionId.empty()) g_CurrentSessionId = "ERROR";
 
-    if(g_CurrentSessionId == "ERROR" || g_CurrentSessionId.empty()){
+    if(g_CurrentSessionId == "ERROR" || g_CurrentSessionId.empty() || g_HostSecret.empty()){
         MessageBoxA(NULL, "Could not reach Cloud Relay. Check Internet connection.", "Gupt", MB_ICONERROR);
         return;
     }
@@ -1191,7 +1261,9 @@ static void RunHostMode() {
     SafeSetClipboardText(g_CurrentSessionId);
 
     std::string rPath = "/relay?role=host&session=" + g_CurrentSessionId;
-    g_Relay.Open(g_SignalingHost, g_SignalingPort, rPath, g_SignalingPort == 443);
+    if (g_Relay.Open(g_SignalingHost, g_SignalingPort, rPath, g_SignalingPort == 443)) {
+        SendRelayAuth("host", g_CurrentSessionId, g_HostSecret);
+    }
 
     // Watchdog for idle/stalled relay socket
     std::thread([](){
@@ -1218,8 +1290,12 @@ static void RunHostMode() {
         };
         while (true) {
             if(!g_Relay.connected) {
+                g_SessionActive = false;
+                g_HostApproved = false;
+                g_HostApprovalPending = false;
                 g_Relay.Open(g_SignalingHost, g_SignalingPort, rPath, g_SignalingPort == 443);
                 if(!g_Relay.connected) { Sleep(500); continue; }
+                SendRelayAuth("host", g_CurrentSessionId, g_HostSecret);
                 g_HostLastRecvTick = GetTickCount64();
             }
             auto d = g_Relay.Recv(); if(d.empty()){ continue; }
@@ -1231,6 +1307,7 @@ static void RunHostMode() {
                     HandleHostConnectRequest(p, true, capturer, relaySend);
                 }
                 else if(t == shared::MessageType::P2PCandidate) {
+                    if (!g_SessionActive.load() || !g_HostApproved.load()) continue;
                     if(p.size() >= sizeof(shared::P2PCandidateMsg)) {
                         auto c = reinterpret_cast<const shared::P2PCandidateMsg*>(p.data());
                         core::network::NatEndpoint peerEp;
@@ -1249,6 +1326,8 @@ static void RunHostMode() {
                 }
                 else if(t == shared::MessageType::Disconnect) {
                     g_SessionActive = false;
+                    g_HostApproved = false;
+                    g_HostApprovalPending = false;
                     g_UsingP2P = false;
                     g_CryptoSession.Reset();
                 }
@@ -1272,6 +1351,8 @@ static void RunHostMode() {
         }
         else if(t == shared::MessageType::Disconnect) {
             g_SessionActive = false;
+            g_HostApproved = false;
+            g_HostApprovalPending = false;
             g_CryptoSession.Reset();
         }
         else {
@@ -1308,7 +1389,49 @@ static void RunHostMode() {
 
     WNDCLASSEXA hwc = {sizeof(WNDCLASSEXA)};
     hwc.lpfnWndProc = [](HWND hw, UINT m, WPARAM w, LPARAM l) -> LRESULT {
+        if (m == WM_GUPT_HOST_APPROVAL) {
+            PendingApprovalState pending;
+            {
+                std::lock_guard<std::mutex> lk(g_PendingApprovalMtx);
+                pending = g_PendingApproval;
+                g_PendingApproval.active = false;
+            }
+            if (pending.active && pending.sendFn) {
+                bool approved = false;
+                if (!g_Headless) {
+                    int choice = MessageBoxA(
+                        NULL,
+                        "A remote controller is requesting access to this computer.\n\nAllow remote control?",
+                        "Gupt - Connection Approval",
+                        MB_YESNO | MB_ICONQUESTION | MB_SETFOREGROUND | MB_TOPMOST
+                    );
+                    approved = (choice == IDYES);
+                }
+                if (approved) {
+                    g_HostApproved = true;
+                    g_SessionActive = true;
+                    if (pending.isRelay) g_UsingRelay = true;
+                    g_HostLastRecvTick = GetTickCount64();
+                    shared::ConnectResponse res = {true, "OK"};
+                    pending.sendFn(shared::SerializeMessage(shared::MessageType::ConnectResponse, res));
+                    pending.sendFn(MakeKeyExchangePacket());
+                    g_ForceFullScan = true;
+                    if (pending.capturer) pending.capturer->RequestKeyframe();
+                    if (pending.isRelay) SendRelayP2PCandidateAsync();
+                    GuptLog("Host approved client connection for session %s", g_CurrentSessionId.c_str());
+                } else {
+                    g_HostApproved = false;
+                    g_SessionActive = false;
+                    shared::ConnectResponse res = {false, "Rejected by host"};
+                    pending.sendFn(shared::SerializeMessage(shared::MessageType::ConnectResponse, res));
+                    GuptLog("Host rejected client connection for session %s", g_CurrentSessionId.c_str());
+                }
+            }
+            g_HostApprovalPending = false;
+            return 0;
+        }
         if(m == WM_CLIPBOARDUPDATE) {
+            if (!g_SessionActive.load() || !g_HostApproved.load()) return 0;
             std::string c = GetClipboardText();
             if(!c.empty() && c != g_lastFromClient) {
                 {
@@ -1325,6 +1448,7 @@ static void RunHostMode() {
     hwc.hInstance = GetModuleHandle(NULL);
     RegisterClassExA(&hwc);
     HWND hHidden = CreateWindowExA(0, "GuptH", 0, 0, 0, 0, 0, 0, HWND_MESSAGE, 0, 0, 0);
+    g_HostUiHwnd = hHidden;
     AddClipboardFormatListener(hHidden);
 
     // Dedicated Dynamic-FPS Capture Thread (Runs decoupled in background immediately with sender-paced flow control)
@@ -1385,8 +1509,12 @@ static void RunHostMode() {
     }).detach();
 
     if (!g_Headless) {
-        MessageBoxA(NULL, ("Gupt Host is active!\n\nSession ID: " + g_CurrentSessionId).c_str(), "Gupt", MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST);
+        std::string hostMsg = "Gupt Host is active!\n\nSession ID: " + g_CurrentSessionId + "\nPairing PIN: " + g_PairingPin + "\n\nKeep this window open while sharing. Click OK to stop hosting.";
+        MessageBoxA(NULL, hostMsg.c_str(), "Gupt", MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST);
     }
+    g_HostUiHwnd = NULL;
+    g_SessionActive = false;
+    g_HostApproved = false;
     g_ActiveLanServer = nullptr;
     ExitProcess(0);
 }
@@ -1749,6 +1877,7 @@ LRESULT CALLBACK ClientWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp) {
                     if(g_Relay.Open(g_SignalingHost, g_SignalingPort, rp, g_SignalingPort==443)){
                         g_UsingRelay = true;
                         g_CryptoSession.InitializeLocalKeyPair();
+                        SendRelayAuth("client", session, g_ClientPin);
                         SetWindowTextA(hWnd, "Gupt - Waiting for host approval...");
                         auto req = MakeConnectRequest();
                         g_Relay.Send(req.data(), (uint32_t)req.size());
@@ -2245,6 +2374,16 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE, LPSTR, int) {
             g_LaunchAsHost = false;
             g_Launched = 1;
             g_HostIp = __argv[++i];
+        } else if (arg == "--pin" && i + 1 < __argc) {
+            g_ClientPin = __argv[++i];
+        }
+    }
+    // Support SESSION_ID:PIN format in g_HostIp when entered in UI or CLI
+    {
+        size_t colon = g_HostIp.find(':');
+        if (colon != std::string::npos && g_ClientPin.empty()) {
+            g_ClientPin = g_HostIp.substr(colon + 1);
+            g_HostIp = g_HostIp.substr(0, colon);
         }
     }
 

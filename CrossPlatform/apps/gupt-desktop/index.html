@@ -40,6 +40,14 @@
               <input id="sessionInput" autocomplete="off" placeholder="Enter ID (e.g. A1B2C3D4)" />
             </div>
           </div>
+
+          <div class="input-group" id="pinGroup">
+            <label for="pinInput">Pairing PIN</label>
+            <div class="input-wrapper">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              <input id="pinInput" autocomplete="off" maxlength="6" placeholder="6-digit PIN" />
+            </div>
+          </div>
           
           <div class="actions">
             <button id="connectBtn" class="primary-btn">Connect Session</button>
@@ -130,6 +138,18 @@
           </div>
         </aside>
       </section>
+
+      <!-- Host Connection Approval Modal -->
+      <div id="hostApprovalModal" class="approval-modal" hidden>
+        <div class="approval-card">
+          <h2>Incoming Connection Request</h2>
+          <p id="hostApprovalText">A remote controller is requesting access to view and control your Mac.</p>
+          <div class="approval-actions">
+            <button id="rejectHostBtn" class="approval-btn reject">Reject</button>
+            <button id="approveHostBtn" class="approval-btn approve">Allow Access</button>
+          </div>
+        </div>
+      </div>
     </main>
     <script type="module" src="/src/main.js"></script>
   </body>

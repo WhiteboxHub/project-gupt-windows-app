@@ -1,15 +1,58 @@
 const WebSocket = require('ws');
-const { v4: uuidv4 } = require('uuid');
+const crypto = require('crypto');
 const http = require('http');
 const url = require('url');
 
 const port = process.env.PORT || 8080;
 
-// Store active sessions: sessionId -> { hostWs, clientWs, hostIp }
-const sessions = new Map();
+const SESSION_IDLE_TTL_MS = 15 * 60 * 1000; // 15 minutes idle/unclaimed expiration
+const SESSION_MAX_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours max lifetime
+const AUTH_TIMEOUT_MS = 5000;
+const MAX_FAILED_AUTH_ATTEMPTS = 5;
+const AUTH_LOCKOUT_MS = 60 * 1000;
+const REGISTER_RATE_WINDOW_MS = 60 * 1000;
+const REGISTER_RATE_MAX = 30;
 
-// Store relay sessions: sessionId -> { hostWs, clientWs }
-const relaySessions = new Map();
+// Store active sessions: sessionId -> { hostWs, clientWs, hostIp, hostSecret, pairingPin, createdAt, expiresAt, maxExpiresAt, failedAttempts, lockedUntil }
+const sessions = new Map();
+const registerRateMap = new Map();
+const ipAuthFailMap = new Map();
+
+function safeEqual(a, b) {
+    if (typeof a !== 'string' || typeof b !== 'string') return false;
+    const h1 = crypto.createHash('sha256').update(a).digest();
+    const h2 = crypto.createHash('sha256').update(b).digest();
+    return crypto.timingSafeEqual(h1, h2);
+}
+
+function isRegisterRateLimited(ip) {
+    const now = Date.now();
+    let entry = registerRateMap.get(ip);
+    if (!entry || now > entry.resetAt) {
+        entry = { count: 0, resetAt: now + REGISTER_RATE_WINDOW_MS };
+        registerRateMap.set(ip, entry);
+    }
+    entry.count += 1;
+    return entry.count > REGISTER_RATE_MAX;
+}
+
+function isIpAuthLocked(ip) {
+    const entry = ipAuthFailMap.get(ip);
+    return !!(entry && entry.lockedUntil > Date.now());
+}
+
+function recordIpAuthFailure(ip) {
+    const now = Date.now();
+    let entry = ipAuthFailMap.get(ip);
+    if (!entry || (entry.lockedUntil && entry.lockedUntil <= now)) {
+        entry = { count: 0, lockedUntil: 0 };
+        ipAuthFailMap.set(ip, entry);
+    }
+    entry.count += 1;
+    if (entry.count >= MAX_FAILED_AUTH_ATTEMPTS * 2) {
+        entry.lockedUntil = now + AUTH_LOCKOUT_MS;
+    }
+}
 
 // --- HTTP Server for native C++ clients (Easy fetch) ---
 const server = http.createServer((req, res) => {
@@ -20,21 +63,40 @@ const server = http.createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');
 
     const forwarded = req.headers['x-forwarded-for'];
-    const clientIp = forwarded ? forwarded.split(',')[0] : req.socket.remoteAddress;
+    const clientIp = forwarded ? forwarded.split(',')[0].trim() : req.socket.remoteAddress;
 
     if (parsedUrl.pathname === '/health' || parsedUrl.pathname === '/') {
         res.writeHead(200);
-        res.end(JSON.stringify({ status: 'healthy', version: '1.2.0' }));
+        res.end(JSON.stringify({ status: 'healthy', version: '1.3.0' }));
         return;
     }
 
     if (parsedUrl.pathname === '/register') {
+        if (isRegisterRateLimited(clientIp)) {
+            res.writeHead(429);
+            res.end(JSON.stringify({ error: 'Too many registration requests' }));
+            return;
+        }
+        const now = Date.now();
         const hIp = clientIp;
-        const sessionId = uuidv4().substring(0, 8);
-        sessions.set(sessionId, { hostWs: null, clientWs: null, hostIp: hIp });
-        console.log(`[HTTP REGISTER] Remote: ${clientIp} | ID: ${sessionId}`);
+        const sessionId = crypto.randomBytes(4).toString('hex');
+        const hostSecret = crypto.randomBytes(32).toString('hex');
+        const pairingPin = String(crypto.randomInt(100000, 1000000));
+        sessions.set(sessionId, {
+            hostWs: null,
+            clientWs: null,
+            hostIp: hIp,
+            hostSecret,
+            pairingPin,
+            createdAt: now,
+            expiresAt: now + SESSION_IDLE_TTL_MS,
+            maxExpiresAt: now + SESSION_MAX_TTL_MS,
+            failedAttempts: 0,
+            lockedUntil: 0
+        });
+        console.log(`[HTTP REGISTER] Session ID: ${sessionId}`);
         res.writeHead(200);
-        res.end(JSON.stringify({ sessionId }));
+        res.end(JSON.stringify({ sessionId, hostSecret, pairingPin, expiresInMs: SESSION_IDLE_TTL_MS }));
         return;
     }
 
@@ -454,71 +516,153 @@ server.on('upgrade', (request, socket, head) => {
     }
 });
 
-// --- Relay WebSocket: transparent binary proxy between host and client ---
+// --- Relay WebSocket: authenticated binary proxy between host and client ---
 relayWss.on('connection', (ws, req) => {
     ws.isAlive = true;
     ws.missedPings = 0;
+    ws.authenticated = false;
     ws.on('pong', heartbeat);
 
+    const forwarded = req.headers['x-forwarded-for'];
+    const clientIp = forwarded ? forwarded.split(',')[0].trim() : req.socket.remoteAddress;
     const parsedUrl = url.parse(req.url, true);
     const { role, session } = parsedUrl.query;
 
-    if (!role || !session) {
-        ws.close(1008, 'Missing role or session');
+    if ((role !== 'host' && role !== 'client') || !session) {
+        ws.close(1008, 'Invalid role or session');
         return;
     }
 
-    console.log(`[RELAY ${role.toUpperCase()}] Session: ${session}`);
-
-    if (!relaySessions.has(session)) {
-        relaySessions.set(session, { hostWs: null, clientWs: null });
-    }
-    const relay = relaySessions.get(session);
-
-    if (role === 'host') {
-        if (relay.hostWs && relay.hostWs !== ws) {
-            try { relay.hostWs.terminate(); } catch (e) {}
+    const sessionRecord = sessions.get(session);
+    if (!sessionRecord || Date.now() > sessionRecord.expiresAt) {
+        if (sessionRecord && Date.now() > sessionRecord.expiresAt) {
+            sessions.delete(session);
         }
-        relay.hostWs = ws;
-        ws.on('message', (data) => {
-            if (relay.clientWs && relay.clientWs.readyState === WebSocket.OPEN) {
-                // Backpressure: drop video frames (type 3) if client buffer exceeds 1.5MB to prevent memory exhaustion
+        ws.close(1008, 'Invalid or expired session');
+        return;
+    }
+
+    if (sessionRecord.lockedUntil > Date.now() || isIpAuthLocked(clientIp)) {
+        ws.close(1008, 'Too many failed authentication attempts');
+        return;
+    }
+
+    const authTimer = setTimeout(() => {
+        if (!ws.authenticated && ws.readyState === WebSocket.OPEN) {
+            ws.close(1008, 'Authentication timeout');
+        }
+    }, AUTH_TIMEOUT_MS);
+    if (authTimer.unref) authTimer.unref();
+
+    ws.on('message', (data, isBinary) => {
+        if (!ws.authenticated) {
+            if (isBinary) {
+                ws.close(1008, 'Authentication required');
+                return;
+            }
+            let authMsg;
+            try {
+                authMsg = JSON.parse(data.toString('utf8'));
+            } catch (e) {
+                ws.close(1008, 'Invalid auth payload');
+                return;
+            }
+
+            if (!authMsg || authMsg.type !== 'relay_auth' || authMsg.role !== role || authMsg.sessionId !== session) {
+                ws.close(1008, 'Invalid auth message');
+                return;
+            }
+
+            const currentSession = sessions.get(session);
+            if (!currentSession || Date.now() > currentSession.expiresAt) {
+                ws.close(1008, 'Session expired');
+                return;
+            }
+            if (currentSession.lockedUntil > Date.now() || isIpAuthLocked(clientIp)) {
+                ws.close(1008, 'Too many failed authentication attempts');
+                return;
+            }
+
+            let authorized = false;
+            if (role === 'host') {
+                authorized = safeEqual(authMsg.hostSecret, currentSession.hostSecret);
+            } else {
+                authorized = safeEqual(authMsg.pin, currentSession.pairingPin);
+            }
+
+            if (!authorized) {
+                currentSession.failedAttempts += 1;
+                recordIpAuthFailure(clientIp);
+                if (currentSession.failedAttempts >= MAX_FAILED_AUTH_ATTEMPTS) {
+                    currentSession.lockedUntil = Date.now() + AUTH_LOCKOUT_MS;
+                }
+                console.log(`[RELAY AUTH FAILED] Role: ${role} | Session: ${session}`);
+                ws.close(1008, 'Authentication failed');
+                return;
+            }
+
+            clearTimeout(authTimer);
+            ws.authenticated = true;
+            currentSession.failedAttempts = 0;
+            currentSession.expiresAt = Math.min(Date.now() + SESSION_IDLE_TTL_MS, currentSession.maxExpiresAt);
+
+            if (role === 'host') {
+                if (currentSession.hostWs && currentSession.hostWs !== ws) {
+                    try { currentSession.hostWs.terminate(); } catch (e) {}
+                }
+                currentSession.hostWs = ws;
+            } else {
+                if (currentSession.clientWs && currentSession.clientWs !== ws) {
+                    try { currentSession.clientWs.terminate(); } catch (e) {}
+                }
+                currentSession.clientWs = ws;
+            }
+
+            console.log(`[RELAY AUTH OK] Role: ${role.toUpperCase()} | Session: ${session}`);
+            ws.send(JSON.stringify({ type: 'relay_auth_ok', role, sessionId: session }));
+            return;
+        }
+
+        // Ignore unexpected non-binary messages after auth
+        if (!isBinary) return;
+
+        const activeSession = sessions.get(session);
+        if (!activeSession || Date.now() > activeSession.expiresAt) {
+            ws.close(1008, 'Session expired');
+            return;
+        }
+        activeSession.expiresAt = Math.min(Date.now() + SESSION_IDLE_TTL_MS, activeSession.maxExpiresAt);
+
+        if (role === 'host') {
+            if (activeSession.clientWs && activeSession.clientWs.readyState === WebSocket.OPEN && activeSession.clientWs.authenticated) {
+                // Backpressure: drop video frames (type 3) if client buffer exceeds 128KB
                 const isVideoBurst = data.length > 0 && (data[0] === 3 || (data[0] === 17 && data.length > 4096));
-                if (relay.clientWs.bufferedAmount > 128 * 1024 && isVideoBurst) {
+                if (activeSession.clientWs.bufferedAmount > 128 * 1024 && isVideoBurst) {
                     return;
                 }
-                relay.clientWs.send(data, { binary: true });
+                activeSession.clientWs.send(data, { binary: true });
             }
-        });
-        ws.on('close', () => {
-            if (relaySessions.has(session)) {
-                const s = relaySessions.get(session);
-                if (s.hostWs === ws) {
-                    s.hostWs = null; if (!s.clientWs) relaySessions.delete(session);
-                }
+        } else if (role === 'client') {
+            if (activeSession.hostWs && activeSession.hostWs.readyState === WebSocket.OPEN && activeSession.hostWs.authenticated) {
+                activeSession.hostWs.send(data, { binary: true });
             }
-            console.log(`[RELAY HOST DISCONNECT] Session: ${session}`);
-        });
-    } else if (role === 'client') {
-        if (relay.clientWs && relay.clientWs !== ws) {
-            try { relay.clientWs.terminate(); } catch (e) {}
         }
-        relay.clientWs = ws;
-        ws.on('message', (data) => {
-            if (relay.hostWs && relay.hostWs.readyState === WebSocket.OPEN) {
-                relay.hostWs.send(data, { binary: true });
+    });
+
+    ws.on('close', () => {
+        clearTimeout(authTimer);
+        if (!ws.authenticated) return;
+        const s = sessions.get(session);
+        if (s) {
+            if (role === 'host' && s.hostWs === ws) {
+                s.hostWs = null;
+                console.log(`[RELAY HOST DISCONNECT] Session: ${session}`);
+            } else if (role === 'client' && s.clientWs === ws) {
+                s.clientWs = null;
+                console.log(`[RELAY CLIENT DISCONNECT] Session: ${session}`);
             }
-        });
-        ws.on('close', () => {
-            if (relaySessions.has(session)) {
-                const s = relaySessions.get(session);
-                if (s.clientWs === ws) {
-                    s.clientWs = null; if (!s.hostWs) relaySessions.delete(session);
-                }
-            }
-            console.log(`[RELAY CLIENT DISCONNECT] Session: ${session}`);
-        });
-    }
+        }
+    });
 });
 
 // --- Signaling WebSocket: session handshake (existing logic) ---
@@ -604,14 +748,49 @@ function pingClients(wss) {
     });
 }
 
+function cleanupExpiredSessions() {
+    const now = Date.now();
+    for (const [sid, s] of sessions.entries()) {
+        if (now > s.expiresAt || now > s.maxExpiresAt) {
+            if (s.hostWs && s.hostWs.readyState === WebSocket.OPEN) {
+                try { s.hostWs.close(1008, 'Session expired'); } catch (e) {}
+            }
+            if (s.clientWs && s.clientWs.readyState === WebSocket.OPEN) {
+                try { s.clientWs.close(1008, 'Session expired'); } catch (e) {}
+            }
+            sessions.delete(sid);
+        }
+    }
+    for (const [ip, entry] of registerRateMap.entries()) {
+        if (now > entry.resetAt) registerRateMap.delete(ip);
+    }
+    for (const [ip, entry] of ipAuthFailMap.entries()) {
+        if (entry.lockedUntil && entry.lockedUntil <= now) ipAuthFailMap.delete(ip);
+    }
+}
+
 const interval = setInterval(() => {
     pingClients(signalingWss);
     pingClients(relayWss);
 }, 25000);
+if (interval.unref) interval.unref();
+
+const cleanupInterval = setInterval(cleanupExpiredSessions, 60000);
+if (cleanupInterval.unref) cleanupInterval.unref();
 
 signalingWss.on('close', () => clearInterval(interval));
-relayWss.on('close', () => clearInterval(interval));
+relayWss.on('close', () => { clearInterval(interval); clearInterval(cleanupInterval); });
 
-server.listen(port, () => {
-    console.log(`[START] Gupt Signaling + Relay Server running on port ${port}`);
-});
+if (require.main === module) {
+    server.listen(port, () => {
+        console.log(`[START] Gupt Signaling + Relay Server running on port ${port}`);
+    });
+}
+
+module.exports = {
+    server,
+    sessions,
+    cleanupExpiredSessions,
+    relayWss,
+    signalingWss
+};

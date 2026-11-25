@@ -91,13 +91,23 @@ const launcher = document.querySelector("#launcher");
 const viewer = document.querySelector("#viewer");
 const statusEl = document.querySelector("#status");
 const sessionInput = document.querySelector("#sessionInput");
+const pinGroup = document.querySelector("#pinGroup");
+const pinInput = document.querySelector("#pinInput");
 const connectBtn = document.querySelector("#connectBtn");
 const startHostBtn = document.querySelector("#startHostBtn");
 const clientModeBtn = document.querySelector("#clientMode");
 const hostModeBtn = document.querySelector("#hostMode");
 const disconnectBtn = document.querySelector("#disconnectBtn");
+const hostApprovalModal = document.querySelector("#hostApprovalModal");
+const approveHostBtn = document.querySelector("#approveHostBtn");
+const rejectHostBtn = document.querySelector("#rejectHostBtn");
 
 let mode = "client";
+let hostApproved = false;
+let hostApprovalPending = false;
+let relayAuthenticated = false;
+let activeHostSecret = "";
+let activePairingPin = "";
 let relay = null;
 let remoteWidth = 0;
 let remoteHeight = 0;
@@ -160,8 +170,9 @@ function setMode(nextMode) {
   hostModeBtn.classList.toggle("selected", mode === "host");
   connectBtn.hidden = mode !== "client";
   startHostBtn.hidden = mode !== "host";
+  if (pinGroup) pinGroup.hidden = mode !== "client";
   sessionInput.toggleAttribute("readonly", mode === "host");
-  statusEl.textContent = mode === "client" ? "Enter a Windows or Mac host session ID." : "Start host to generate a session ID.";
+  statusEl.textContent = mode === "client" ? "Enter a Windows or Mac host session ID and PIN." : "Start host to generate a session ID and PIN.";
 }
 
 function clearCanvas(message = "") {
@@ -185,7 +196,13 @@ function clearCanvas(message = "") {
 }
 
 async function startClient() {
-  const session = sessionInput.value.trim();
+  let session = sessionInput.value.trim();
+  let pin = pinInput ? pinInput.value.trim() : "";
+  if (session.includes(":") && !pin) {
+    const parts = session.split(":");
+    session = parts[0].trim();
+    pin = parts.slice(1).join(":").trim();
+  }
   if (!session) {
     statusEl.textContent = "Enter a session ID.";
     return;
@@ -193,7 +210,9 @@ async function startClient() {
 
   intentionalDisconnect = false;
   isSessionConnected = false;
+  relayAuthenticated = false;
   activeSessionId = session;
+  activePairingPin = pin;
   reconnectAttempts = 0;
   lastFrameReceivedAt = 0;
   pendingFrames = [];
@@ -208,8 +227,17 @@ async function startHost() {
   try {
     statusEl.textContent = "Registering host...";
     const register = await fetch(`${HTTP_BASE}/register`);
-    const { sessionId } = await register.json();
+    if (!register.ok) {
+      throw new Error(`Registration failed (${register.status})`);
+    }
+    const { sessionId, hostSecret, pairingPin } = await register.json();
     sessionInput.value = sessionId;
+    activeSessionId = sessionId;
+    activeHostSecret = hostSecret || "";
+    activePairingPin = pairingPin || "";
+    hostApproved = false;
+    hostApprovalPending = false;
+    relayAuthenticated = false;
     intentionalDisconnect = false;
 
     hostCapture = await navigator.mediaDevices.getDisplayMedia({
@@ -225,6 +253,7 @@ async function startHost() {
     if (track) {
       track.onended = () => {
         statusMsg.textContent = "Screen sharing stopped.";
+        hostApproved = false;
         stopHostStreaming();
       };
     }
@@ -232,6 +261,7 @@ async function startHost() {
       ? new OffscreenCanvas(1920, 1080)
       : document.createElement("canvas");
 
+    statusEl.textContent = `Session ID: ${sessionId} | PIN: ${activePairingPin}`;
     connectRelay("host", sessionId);
   } catch (err) {
     console.error("Host Error:", err);
@@ -248,17 +278,20 @@ function openRelay(role, session) {
 
 function connectRelay(role, session) {
   clearTimeout(reconnectTimer);
+  relayAuthenticated = false;
   relay?.close();
   relay = openRelay(role, session);
 
   relay.addEventListener("open", () => {
     reconnectAttempts = 0;
+    const authPayload = role === "host"
+      ? { type: "relay_auth", role: "host", sessionId: session, hostSecret: activeHostSecret }
+      : { type: "relay_auth", role: "client", sessionId: session, pin: activePairingPin };
+    relay.send(JSON.stringify(authPayload));
     if (role === "client") {
-      relay.send(encodeConnectRequest(session));
-      streamStatus.textContent = "Waiting for host approval...";
+      streamStatus.textContent = "Authenticating with relay...";
     } else {
-      statusEl.textContent = `Hosting. Session ID: ${session}`;
-      if (!hostActive) startHostStreaming();
+      statusEl.textContent = `Session ID: ${session} | PIN: ${activePairingPin} (Authenticating...)`;
     }
   });
 
@@ -271,6 +304,13 @@ function connectRelay(role, session) {
 
 function handleRelayClose(role, session) {
   isSessionConnected = false;
+  relayAuthenticated = false;
+  if (role === "host") {
+    hostApproved = false;
+    hostApprovalPending = false;
+    if (hostApprovalModal) hostApprovalModal.hidden = true;
+    hostActive = false;
+  }
   if (intentionalDisconnect) {
     if (role === "host") stopHostStreaming();
     if (role === "client") streamStatus.textContent = "Disconnected";
@@ -320,7 +360,11 @@ function handleClientMessage(event) {
   if (typeof event.data === "string") {
     try {
       const parsed = JSON.parse(event.data);
-      if (parsed.type === "error") {
+      if (parsed.type === "relay_auth_ok") {
+        relayAuthenticated = true;
+        relay?.send(encodeConnectRequest(activeSessionId, activePairingPin));
+        streamStatus.textContent = "Waiting for host approval...";
+      } else if (parsed.type === "error") {
         streamStatus.textContent = parsed.message || "Connection Error";
         statusEl.textContent = parsed.message || "Connection Error";
         clearCanvas(`Error: ${parsed.message || "Connection failed"}`);
@@ -396,15 +440,63 @@ function processMouseInjection(mouseData) {
     });
 }
 
+function resolveHostApproval(approved) {
+  hostApprovalPending = false;
+  if (hostApprovalModal) hostApprovalModal.hidden = true;
+  if (approved) {
+    hostApproved = true;
+    relay?.send(encodeConnectResponse(true, "OK"));
+    statusMsg.textContent = `Client connected. Streaming active.`;
+    if (!hostActive && hostCapture) {
+      startHostStreaming();
+    }
+  } else {
+    hostApproved = false;
+    hostActive = false;
+    relay?.send(encodeConnectResponse(false, "Rejected by host"));
+    statusMsg.textContent = `Connection rejected. Session ID: ${activeSessionId} | PIN: ${activePairingPin}`;
+  }
+}
+
+approveHostBtn?.addEventListener("click", () => resolveHostApproval(true));
+rejectHostBtn?.addEventListener("click", () => resolveHostApproval(false));
+
 function handleHostMessage(event) {
-  if (typeof event.data === "string") return;
+  if (typeof event.data === "string") {
+    try {
+      const parsed = JSON.parse(event.data);
+      if (parsed.type === "relay_auth_ok") {
+        relayAuthenticated = true;
+        statusMsg.textContent = `Hosting. Session ID: ${activeSessionId} | PIN: ${activePairingPin} — Waiting for controller...`;
+      }
+    } catch (e) {}
+    return;
+  }
   for (const msg of decodeMessages(event.data)) {
     if (msg.type === MessageType.ConnectRequest) {
-      relay?.send(encodeConnectResponse(true, "OK"));
-      statusMsg.textContent = `Client connected. Streaming active.`;
-      if (!hostActive && hostCapture) {
-        startHostStreaming();
+      if (hostApproved) {
+        relay?.send(encodeConnectResponse(false, "Session already active"));
+        continue;
       }
+      if (hostApprovalPending) {
+        relay?.send(encodeConnectResponse(false, "Approval already pending"));
+        continue;
+      }
+      hostApprovalPending = true;
+      if (hostApprovalModal) {
+        hostApprovalModal.hidden = false;
+      } else {
+        resolveHostApproval(false);
+      }
+    } else if (msg.type === MessageType.Disconnect) {
+      hostApproved = false;
+      hostApprovalPending = false;
+      hostActive = false;
+      if (hostApprovalModal) hostApprovalModal.hidden = true;
+      statusMsg.textContent = `Controller disconnected. Session ID: ${activeSessionId} | PIN: ${activePairingPin}`;
+    } else if (!hostApproved) {
+      // Strict authorization gate: reject MouseEvent, KeyboardEvent, ClipboardText before approval or after disconnect
+      continue;
     } else if (msg.type === MessageType.MouseEvent) {
       if (window.__TAURI__ && window.__TAURI__.core) {
         const view = new DataView(msg.payload.buffer, msg.payload.byteOffset, msg.payload.byteLength);
@@ -651,6 +743,10 @@ function showViewer() {
 function disconnect() {
   intentionalDisconnect = true;
   isSessionConnected = false;
+  hostApproved = false;
+  hostApprovalPending = false;
+  relayAuthenticated = false;
+  if (hostApprovalModal) hostApprovalModal.hidden = true;
   clearTimeout(reconnectTimer);
   reconnectAttempts = 0;
 
@@ -674,6 +770,8 @@ function disconnect() {
 
   // 4. Reset session state
   activeSessionId = "";
+  activeHostSecret = "";
+  activePairingPin = "";
   sessionInput.value = "";
   lastFrameReceivedAt = 0;
   pendingFrames = [];
@@ -702,7 +800,7 @@ async function hostLoop(video, hostCtx) {
   let isEncoding = false;
 
   const processFrame = async () => {
-    if (!hostActive) return;
+    if (!hostActive || !hostApproved) return;
     
     if (isEncoding) {
       scheduleNext();
