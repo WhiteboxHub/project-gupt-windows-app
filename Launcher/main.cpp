@@ -433,7 +433,7 @@ public:
         if(!connected) return false;
         std::lock_guard<std::mutex> lk(sendMtx);
         if(!connected || !hWS) return false;
-        DWORD r = WinHttpWebSocketSend(hWS, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE, const_cast<void*>(text.data()), static_cast<DWORD>(text.size()));
+        DWORD r = WinHttpWebSocketSend(hWS, WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE, const_cast<void*>(static_cast<const void*>(text.data())), static_cast<DWORD>(text.size()));
         if(r != 0) {
             connected = false;
             return false;
